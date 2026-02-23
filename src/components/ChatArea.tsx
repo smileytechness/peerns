@@ -208,7 +208,7 @@ export function ChatArea({ pid, friendlyName, messages, onSendMessage, onSendFil
   };
 
   return (
-    <div className="flex flex-col h-full bg-gray-900">
+    <div className="flex flex-col h-full bg-gray-900 anim-slide-right">
       <div className="p-3 border-b border-gray-800 bg-gray-900 flex justify-between items-center shrink-0">
         <div className="flex items-center gap-2">
           <button onClick={onBack} className="md:hidden p-1.5 hover:bg-gray-800 rounded text-gray-400 hover:text-white">

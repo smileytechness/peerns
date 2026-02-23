@@ -1,1 +1,39 @@
 @import "tailwindcss";
+
+/* ── Lightweight UI animations ─────────────────────────────────────────────── */
+
+/* Modal backdrop fade-in */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Modal content scale-up */
+@keyframes scale-up {
+  from { opacity: 0; transform: scale(0.95) translateY(4px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+/* Slide up (for bottom sheets / log panel) */
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Slide in from right (chat area enter) */
+@keyframes slide-in-right {
+  from { opacity: 0; transform: translateX(12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* Subtle fade */
+@keyframes fade-in-fast {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.anim-fade-in      { animation: fade-in 150ms ease-out both; }
+.anim-scale-up     { animation: scale-up 150ms ease-out both; }
+.anim-slide-up     { animation: slide-up 150ms ease-out both; }
+.anim-slide-right  { animation: slide-in-right 120ms ease-out both; }
+.anim-fade-fast    { animation: fade-in-fast 100ms ease-out both; }

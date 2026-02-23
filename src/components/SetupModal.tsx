@@ -15,8 +15,8 @@ export function SetupModal({ onJoin }: SetupModalProps) {
   };
 
   return (
-    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
-      <div className="bg-gray-900 border border-gray-800 p-8 rounded-xl w-80 shadow-2xl">
+    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 anim-fade-in">
+      <div className="bg-gray-900 border border-gray-800 p-8 rounded-xl w-80 shadow-2xl anim-scale-up">
         <h2 className="text-2xl font-bold text-blue-500 mb-2">myapp</h2>
         <p className="text-gray-400 text-sm mb-6">Serverless P2P — proof of concept</p>
         <form onSubmit={handleSubmit}>

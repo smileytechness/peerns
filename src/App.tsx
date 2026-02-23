@@ -436,7 +436,7 @@ export default function App() {
 
       {/* Log panel — toggled by version badge */}
       {showLogs && (
-        <div className="shrink-0 h-32 border-t border-gray-800 bg-black overflow-y-auto">
+        <div className="shrink-0 h-32 border-t border-gray-800 bg-black overflow-y-auto anim-slide-up">
           <div className="px-2 py-1 min-h-full">
             {logs.length === 0 ? (
               <div className="text-[11px] text-gray-700 font-mono pt-1">awaiting logs...</div>
@@ -552,8 +552,8 @@ export default function App() {
       )}
 
       {connRequest && (
-        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-900 border border-gray-800 p-5 rounded-xl w-full max-w-sm shadow-2xl">
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4 anim-fade-in">
+          <div className="bg-gray-900 border border-gray-800 p-5 rounded-xl w-full max-w-sm shadow-2xl anim-scale-up">
             <h3 className="text-base font-semibold text-gray-200 mb-3">Incoming Connection Request</h3>
             <div className="mb-4">
               <div className="text-white font-bold text-lg">{connRequest.fname}</div>
@@ -600,8 +600,8 @@ export default function App() {
       )}
 
       {incomingCall && (
-        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
-          <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl w-80 shadow-2xl">
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 anim-fade-in">
+          <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl w-80 shadow-2xl anim-scale-up">
             <h3 className="text-lg font-semibold text-gray-200 mb-1">Incoming Call</h3>
             <p className="text-gray-400 text-sm mb-3">
               <span className="text-white font-semibold">{incomingCall.fname}</span> is calling ({incomingCall.kind}).

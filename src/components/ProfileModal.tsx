@@ -77,11 +77,11 @@ export function ProfileModal({
 
   return (
     <div
-      className="fixed inset-0 bg-black/80 flex items-end sm:items-center justify-center z-50 p-0 sm:p-4"
+      className="fixed inset-0 bg-black/80 flex items-end sm:items-center justify-center z-50 p-0 sm:p-4 anim-fade-in"
       onClick={onClose}
     >
       <div
-        className="bg-gray-900 border border-gray-800 rounded-t-2xl sm:rounded-xl w-full sm:max-w-sm shadow-2xl max-h-[90vh] overflow-y-auto"
+        className="bg-gray-900 border border-gray-800 rounded-t-2xl sm:rounded-xl w-full sm:max-w-sm shadow-2xl max-h-[90vh] overflow-y-auto anim-slide-up"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}

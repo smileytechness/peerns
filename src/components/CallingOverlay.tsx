@@ -23,7 +23,7 @@ export function CallingOverlay({ fname, kind, onCancel }: CallingOverlayProps) {
   }, []);
 
   return (
-    <div className="fixed inset-0 bg-black/90 z-[100] flex flex-col items-center justify-center gap-6">
+    <div className="fixed inset-0 bg-black/90 z-[100] flex flex-col items-center justify-center gap-6 anim-fade-in">
       <div className="flex flex-col items-center gap-4">
         <div className="w-20 h-20 rounded-full bg-gray-800 border-2 border-blue-500 flex items-center justify-center animate-pulse">
           <KindIcon kind={kind} />

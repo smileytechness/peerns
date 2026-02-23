@@ -33,11 +33,11 @@ export function NamespaceModal({ role, ip, discID, namespaceLevel, isRouter, reg
 
   return (
     <div
-      className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4"
+      className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4 anim-fade-in"
       onClick={onClose}
     >
       <div
-        className="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-md shadow-2xl overflow-hidden"
+        className="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-md shadow-2xl overflow-hidden anim-scale-up"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

@@ -25,7 +25,7 @@ export function MediaOverlay({ stream, localStream, cameraStream, fname, kind, o
   const isScreen = kind === 'screen';
 
   return (
-    <div className="fixed inset-0 bg-black/95 z-[100] flex flex-col items-center justify-center">
+    <div className="fixed inset-0 bg-black/95 z-[100] flex flex-col items-center justify-center anim-fade-in">
       <div className="absolute top-4 left-4 text-gray-400 text-sm">
         {isScreen ? '📺 Screen share' : '📞 Call'} with{' '}
         <span className="text-white font-semibold">{fname}</span>

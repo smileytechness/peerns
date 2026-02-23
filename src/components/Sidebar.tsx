@@ -237,7 +237,7 @@ export function Sidebar({
           </button>
 
           {nsExpanded && (
-            <div className="px-3 pb-3 space-y-2">
+            <div className="px-3 pb-3 space-y-2 anim-fade-fast">
               {/* Public IP namespace card */}
               {networkIP ? (
                 <div className={clsx('bg-gray-800 rounded-lg p-2.5 text-[11px]', namespaceOffline && 'opacity-50')}>

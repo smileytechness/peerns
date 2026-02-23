@@ -67,11 +67,11 @@ export function ConnectModal({ onConnect, onClose }: ConnectModalProps) {
 
   return (
     <div
-      className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4"
+      className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4 anim-fade-in"
       onClick={onClose}
     >
       <div
-        className="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-sm shadow-2xl"
+        className="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-sm shadow-2xl anim-scale-up"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="p-5">
