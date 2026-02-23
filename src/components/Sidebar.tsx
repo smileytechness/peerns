@@ -115,8 +115,12 @@ export function Sidebar({
   const unknownOnNet = Object.keys(registry).filter((did) => !registry[did].isMe && !registry[did].knownPID);
   const peerCount = Object.keys(registry).filter(k => !registry[k].isMe).length;
 
-  const [nsExpanded, setNsExpanded] = useState(true);
+  const [nsExpanded, setNsExpanded] = useState(() => localStorage.getItem('myapp-ns-expanded') !== '0');
   const [nsInput, setNsInput] = useState('');
+
+  const cnsArr = Object.values(customNamespaces);
+  const totalNS = (networkIP ? 1 : 0) + cnsArr.length;
+  const activeNS = (networkIP && !namespaceOffline ? 1 : 0) + cnsArr.filter(ns => !ns.offline).length;
   const [installPrompt, setInstallPrompt] = useState<any>(null);
 
   useEffect(() => {
@@ -225,10 +229,10 @@ export function Sidebar({
         {/* ── Discovery Namespaces ── */}
         <div className="border-b border-gray-800">
           <button
-            onClick={() => setNsExpanded((v: boolean) => !v)}
+            onClick={() => setNsExpanded((v: boolean) => { const next = !v; localStorage.setItem('myapp-ns-expanded', next ? '1' : '0'); return next; })}
             className="w-full flex items-center justify-between px-3 py-2 text-[10px] text-gray-500 uppercase tracking-wider hover:bg-gray-800/50 transition-colors"
           >
-            <span>📡 Discovery Namespaces</span>
+            <span>📡 Discovery Namespaces {totalNS > 0 && <span className={activeNS === totalNS ? 'text-green-600' : 'text-orange-500'}>({activeNS}/{totalNS})</span>}</span>
             {nsExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           </button>
 

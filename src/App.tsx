@@ -118,6 +118,7 @@ export default function App() {
   const [setupNeeded, setSetupNeeded] = useState(!localStorage.getItem('myapp-name'));
   const [contactModalPid, setContactModalPid] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [showLogs, setShowLogs] = useState(false);
 
   const [connRequest, setConnRequest] = useState<{ fname: string; publicKey?: string; fingerprint?: string; verified?: boolean; accept: () => void; reject: () => void; saveForLater: () => void } | null>(null);
   const [pendingConnectPID] = useState<string | null>(() => {
@@ -126,6 +127,8 @@ export default function App() {
   const [incomingCall, setIncomingCall] = useState<{ call: any; fname: string; kind: string } | null>(null);
   const [callingState, setCallingState] = useState<{ fname: string; kind: 'audio' | 'video' | 'screen'; call: any; stream: MediaStream; cameraStream?: MediaStream } | null>(null);
   const [activeCall, setActiveCall] = useState<{ stream: MediaStream; localStream?: MediaStream; cameraStream?: MediaStream; fname: string; kind: string; call: any } | null>(null);
+  const [callCountdown, setCallCountdown] = useState(60);
+  const [reqCountdown, setReqCountdown] = useState(60);
 
   const logEndRef = useRef<HTMLDivElement>(null);
   const stopIncomingRing = useRef<(() => void) | null>(null);
@@ -179,6 +182,24 @@ export default function App() {
     }
     return () => { stopOutgoingRing.current?.(); };
   }, [callingState]);
+
+  // ── Auto-decline incoming call after 60s ─────────────────────────────────
+  useEffect(() => {
+    if (!incomingCall) { setCallCountdown(60); return; }
+    setCallCountdown(60);
+    const tick = setInterval(() => setCallCountdown(prev => prev - 1), 1000);
+    const timeout = setTimeout(() => { rejectCall(); }, 60000);
+    return () => { clearInterval(tick); clearTimeout(timeout); };
+  }, [incomingCall]);
+
+  // ── Auto-"Later" connection request after 60s ──────────────────────────
+  useEffect(() => {
+    if (!connRequest) { setReqCountdown(60); return; }
+    setReqCountdown(60);
+    const tick = setInterval(() => setReqCountdown(prev => prev - 1), 1000);
+    const timeout = setTimeout(() => { connRequest.saveForLater(); setConnRequest(null); }, 60000);
+    return () => { clearInterval(tick); clearTimeout(timeout); };
+  }, [connRequest]);
 
   // ── Incoming connection request sound ──────────────────────────────────────
   useEffect(() => {
@@ -413,33 +434,41 @@ export default function App() {
         </div>
       </div>
 
-      {/* Log panel */}
-      <div className="shrink-0 h-24 border-t border-gray-800 bg-black overflow-y-auto">
-        <div className="px-2 py-1 min-h-full">
-          {logs.length === 0 ? (
-            <div className="text-[11px] text-gray-700 font-mono pt-1">awaiting logs...</div>
-          ) : (
-            logs.slice(-100).map((l: { msg: string; type: string; ts: number }, i: number) => (
-              <div
-                key={i}
-                className={clsx(
-                  'text-[11px] font-mono leading-snug',
-                  l.type === 'ok'  ? 'text-green-400' :
-                  l.type === 'err' ? 'text-red-400'   : 'text-blue-400'
-                )}
-              >
-                [{new Date(l.ts).toLocaleTimeString()}] {l.msg}
-              </div>
-            ))
-          )}
-          <div ref={logEndRef} />
+      {/* Log panel — toggled by version badge */}
+      {showLogs && (
+        <div className="shrink-0 h-32 border-t border-gray-800 bg-black overflow-y-auto">
+          <div className="px-2 py-1 min-h-full">
+            {logs.length === 0 ? (
+              <div className="text-[11px] text-gray-700 font-mono pt-1">awaiting logs...</div>
+            ) : (
+              logs.slice(-100).map((l: { msg: string; type: string; ts: number }, i: number) => (
+                <div
+                  key={i}
+                  className={clsx(
+                    'text-[11px] font-mono leading-snug',
+                    l.type === 'ok'  ? 'text-green-400' :
+                    l.type === 'err' ? 'text-red-400'   : 'text-blue-400'
+                  )}
+                >
+                  [{new Date(l.ts).toLocaleTimeString()}] {l.msg}
+                </div>
+              ))
+            )}
+            <div ref={logEndRef} />
+          </div>
         </div>
-      </div>
+      )}
 
-      {/* Build badge */}
-      <div className="fixed bottom-2 right-2 z-[200] bg-gray-800 border border-gray-700 text-gray-500 text-[10px] font-mono px-1.5 py-0.5 rounded pointer-events-none select-none">
-        #{BUILD}
-      </div>
+      {/* Version badge */}
+      <button
+        onClick={() => setShowLogs(v => !v)}
+        className={clsx(
+          'fixed bottom-2 right-2 z-[200] border text-[10px] font-mono px-1.5 py-0.5 rounded transition-colors',
+          showLogs ? 'bg-blue-900/50 border-blue-700 text-blue-400' : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-gray-400'
+        )}
+      >
+        Version #0.{BUILD}
+      </button>
 
       {/* Toast notifications */}
       <div className="fixed bottom-28 left-2 z-[150] flex flex-col gap-2 pointer-events-none">
@@ -548,6 +577,9 @@ export default function App() {
                 <div className="text-gray-400">No public key provided — identity unverified</div>
               )}
             </div>
+            <div className="text-[10px] text-gray-500 text-center mb-2">
+              Auto-saving for later in <span className={clsx('font-mono font-bold', reqCountdown <= 10 ? 'text-orange-400' : 'text-gray-400')}>{reqCountdown}s</span>
+            </div>
             <div className="flex gap-2">
               <button
                 onClick={() => { connRequest.accept(); setConnRequest(null); }}
@@ -571,9 +603,22 @@ export default function App() {
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
           <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl w-80 shadow-2xl">
             <h3 className="text-lg font-semibold text-gray-200 mb-1">Incoming Call</h3>
-            <p className="text-gray-400 text-sm mb-6">
+            <p className="text-gray-400 text-sm mb-3">
               <span className="text-white font-semibold">{incomingCall.fname}</span> is calling ({incomingCall.kind}).
             </p>
+            {/* Countdown bar */}
+            <div className="mb-4">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] text-gray-500">Auto-decline in</span>
+                <span className={clsx('text-[11px] font-mono font-bold', callCountdown <= 10 ? 'text-red-400' : 'text-gray-400')}>{callCountdown}s</span>
+              </div>
+              <div className="w-full h-1 bg-gray-800 rounded-full overflow-hidden">
+                <div
+                  className={clsx('h-full rounded-full transition-all duration-1000', callCountdown <= 10 ? 'bg-red-500' : 'bg-gray-600')}
+                  style={{ width: `${(callCountdown / 60) * 100}%` }}
+                />
+              </div>
+            </div>
             <div className="flex gap-3">
               <button onClick={answerCall} className="flex-1 bg-green-600 hover:bg-green-700 text-white font-semibold py-2 rounded text-sm">Answer</button>
               <button onClick={rejectCall} className="flex-1 bg-red-600 hover:bg-red-700 text-white font-semibold py-2 rounded text-sm">Reject</button>

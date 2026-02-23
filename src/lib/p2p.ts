@@ -174,6 +174,19 @@ export class P2PManager extends EventTarget {
     await this.loadState();
     this.log('Initializing...', 'info');
 
+    // Restore persisted offline states
+    const savedOffline = !!localStorage.getItem('myapp-offline');
+    const savedNsOffline = !!localStorage.getItem('myapp-ns-offline');
+
+    if (savedOffline) {
+      this.offlineMode = true;
+      this.namespaceOffline = true;
+      this.signalingState = 'offline';
+      this.log('Restored offline mode from previous session', 'info');
+      this.emitStatus();
+      return;
+    }
+
     this.registerPersistent();
     this.watchNetwork();
     this.startHeartbeat();
@@ -187,7 +200,13 @@ export class P2PManager extends EventTarget {
 
     this.log(`Public IP: ${this.publicIP}`, 'ok');
     this.discoveryID = makeDiscID(this.publicIP, this.discoveryUUID);
-    this.attemptNamespace(1);
+
+    if (savedNsOffline) {
+      this.namespaceOffline = true;
+      this.log('Restored namespace offline from previous session', 'info');
+    } else {
+      this.attemptNamespace(1);
+    }
     this.cnsRestoreSaved();
 
     this.emitStatus();
@@ -361,6 +380,7 @@ export class P2PManager extends EventTarget {
 
   public setOfflineMode(offline: boolean) {
     this.offlineMode = offline;
+    localStorage.setItem('myapp-offline', offline ? '1' : '');
     this.log(offline ? 'Offline mode — all connections paused' : 'Going online...', 'info');
     if (offline) {
       // Kill namespace discovery too
@@ -372,7 +392,8 @@ export class P2PManager extends EventTarget {
       this.signalingState = 'offline';
       this.emitStatus();
     } else {
-      this.namespaceOffline = false; // re-enable namespace when going online
+      this.namespaceOffline = false;
+      localStorage.setItem('myapp-ns-offline', ''); // re-enable namespace when going online
       this.signalingState = 'reconnecting';
       this.handleOnline();
     }
@@ -380,6 +401,7 @@ export class P2PManager extends EventTarget {
 
   public setNamespaceOffline(offline: boolean) {
     this.namespaceOffline = offline;
+    localStorage.setItem('myapp-ns-offline', offline ? '1' : '');
     if (offline) {
       this.clearNamespaceMonitor();
       if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
@@ -1652,6 +1674,7 @@ export class P2PManager extends EventTarget {
         this.cnsAttempt(slug, 1);
       }
     }
+    this.cnsSave();
     this.cnsEmit();
   }
 
@@ -1671,16 +1694,19 @@ export class P2PManager extends EventTarget {
   }
 
   private cnsSave() {
-    const arr = Array.from(this.cns.values()).map(s => ({ name: s.name, slug: s.slug }));
+    const arr = Array.from(this.cns.values()).map(s => ({ name: s.name, slug: s.slug, offline: s.offline }));
     localStorage.setItem('myapp-custom-ns', JSON.stringify(arr));
   }
 
   private cnsRestoreSaved() {
     try {
-      const saved = JSON.parse(localStorage.getItem('myapp-custom-ns') || '[]') as { name: string }[];
-      saved.forEach(({ name }) => {
+      const saved = JSON.parse(localStorage.getItem('myapp-custom-ns') || '[]') as { name: string; offline?: boolean }[];
+      saved.forEach(({ name, offline }) => {
         const slug = slugifyNamespace(name);
-        if (!this.cns.has(slug)) this.joinCustomNamespace(name);
+        if (!this.cns.has(slug)) {
+          this.joinCustomNamespace(name);
+          if (offline) this.setCustomNSOffline(slug, true);
+        }
       });
     } catch {}
   }

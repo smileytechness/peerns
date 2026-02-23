@@ -20,8 +20,8 @@ export function useP2P() {
   const [registry, setRegistry] = useState<Record<string, PeerInfo>>({});
   const [chats, setChats] = useState<Record<string, ChatMessage[]>>({});
   const [logs, setLogs] = useState<{ msg: string; type: string; ts: number }[]>([]);
-  const [offlineMode, setOfflineModeState] = useState(false);
-  const [namespaceOffline, setNamespaceOfflineState] = useState(false);
+  const [offlineMode, setOfflineModeState] = useState(() => !!localStorage.getItem('myapp-offline'));
+  const [namespaceOffline, setNamespaceOfflineState] = useState(() => !!localStorage.getItem('myapp-ns-offline'));
   const [customNamespaces, setCustomNamespaces] = useState<Record<string, CustomNS>>(() => p2p.customNamespaces);
   const [lastRead, setLastRead] = useState<Record<string, number>>(() => {
     try { return JSON.parse(localStorage.getItem('myapp-lastread') || '{}'); } catch { return {}; }
