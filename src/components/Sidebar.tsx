@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect } from 'react';
 import { Contact, PeerInfo, ChatMessage, CustomNS, APP_PREFIX } from '../lib/types';
 import { extractDiscUUID } from '../lib/discovery';
 import { clsx } from 'clsx';
-import { Info, ChevronDown, ChevronRight, Key, Share2, UserPlus, Wifi, WifiOff, Download, Radio, Pencil, Plus } from 'lucide-react';
+import { Info, ChevronDown, ChevronRight, Key, Share2, UserPlus, Wifi, WifiOff, Download, Radio, Pencil, Plus, Bell } from 'lucide-react';
 
 interface SidebarProps {
   // My identity (shown in header)
@@ -42,9 +42,14 @@ interface SidebarProps {
   onDismissPending: (pid: string) => void;
   // Custom namespaces
   customNamespaces: Record<string, CustomNS>;
-  onJoinCustomNS: (name: string) => void;
+  onJoinCustomNS: (name: string, advanced?: boolean) => void;
   onToggleCustomNSOffline: (slug: string, offline: boolean) => void;
   onShowCustomNSInfo: (slug: string) => void;
+  // Footer
+  onShowLearnMore: () => void;
+  onToggleLogs: () => void;
+  showLogs: boolean;
+  buildNumber: number;
 }
 
 function formatTimeSince(ts: number): string {
@@ -67,7 +72,9 @@ function formatTime(ts: number): string {
 function lastMessagePreview(msgs: ChatMessage[] | undefined): { text: string; ts: number } | null {
   if (!msgs || msgs.length === 0) return null;
   const last = msgs[msgs.length - 1];
-  const text = last.type === 'file' ? `📎 ${last.name || 'file'}` : (last.content || '');
+  const text = last.type === 'file' ? `📎 ${last.name || 'file'}`
+             : last.type === 'call' ? `📞 ${last.callResult === 'answered' ? `${last.callKind} call` : last.callResult === 'missed' ? 'Missed call' : last.callResult === 'rejected' ? 'Declined call' : 'Cancelled call'}`
+             : (last.content || '');
   return { text, ts: last.ts };
 }
 
@@ -107,21 +114,35 @@ export function Sidebar({
   onJoinCustomNS,
   onToggleCustomNSOffline,
   onShowCustomNSInfo,
+  onShowLearnMore,
+  onToggleLogs,
+  showLogs,
+  buildNumber,
 }: SidebarProps) {
   const allPIDs = Object.keys(peers);
   const incomingPIDs = allPIDs.filter(pid => peers[pid].pending === 'incoming');
   const outgoingPIDs = allPIDs.filter(pid => peers[pid].pending === 'outgoing');
-  const savedPIDs = allPIDs.filter(pid => !peers[pid].pending);
+  const savedPIDsRaw = allPIDs.filter(pid => !peers[pid].pending);
+  // Deduplicate by publicKey — if multiple PIDs share a publicKey, keep first occurrence
+  const savedPIDs = savedPIDsRaw.filter((pid, i) => {
+    const pk = peers[pid].publicKey;
+    if (!pk) return true;
+    return savedPIDsRaw.findIndex(p => peers[p].publicKey === pk) === i;
+  });
   const unknownOnNet = Object.keys(registry).filter((did) => !registry[did].isMe && !registry[did].knownPID);
   const peerCount = Object.keys(registry).filter(k => !registry[k].isMe).length;
 
-  const [nsExpanded, setNsExpanded] = useState(() => localStorage.getItem('myapp-ns-expanded') !== '0');
+  const [nsExpanded, setNsExpanded] = useState(() => localStorage.getItem(`${APP_PREFIX}-ns-expanded`) !== '0');
   const [nsInput, setNsInput] = useState('');
+  const [nsAdvanced, setNsAdvanced] = useState(false);
 
   const cnsArr = Object.values(customNamespaces);
   const totalNS = (networkIP ? 1 : 0) + cnsArr.length;
   const activeNS = (networkIP && !namespaceOffline ? 1 : 0) + cnsArr.filter(ns => !ns.offline).length;
   const [installPrompt, setInstallPrompt] = useState<any>(null);
+  const [notifPerm, setNotifPerm] = useState<string>(() =>
+    'Notification' in window ? Notification.permission : 'unavailable'
+  );
 
   useEffect(() => {
     const handler = (e: Event) => { e.preventDefault(); setInstallPrompt(e); };
@@ -177,6 +198,20 @@ export function Sidebar({
           >
             {offlineMode ? <WifiOff size={14} /> : <Wifi size={14} />}
           </button>
+          {notifPerm === 'default' && (
+            <button
+              onClick={async () => {
+                if ('Notification' in window) {
+                  const r = await Notification.requestPermission();
+                  setNotifPerm(r);
+                }
+              }}
+              className="flex items-center gap-1 text-[10px] text-yellow-400 hover:text-yellow-300 px-1.5 py-0.5 hover:bg-yellow-900/20 rounded transition-colors shrink-0"
+              title="Enable notifications for messages when app is backgrounded"
+            >
+              <Bell size={11} />
+            </button>
+          )}
           {installPrompt && (
             <button
               onClick={() => { installPrompt.prompt(); setInstallPrompt(null); }}
@@ -229,7 +264,7 @@ export function Sidebar({
         {/* ── Discovery Namespaces ── */}
         <div className="border-b border-gray-800">
           <button
-            onClick={() => setNsExpanded((v: boolean) => { const next = !v; localStorage.setItem('myapp-ns-expanded', next ? '1' : '0'); return next; })}
+            onClick={() => setNsExpanded((v: boolean) => { const next = !v; localStorage.setItem(`${APP_PREFIX}-ns-expanded`, next ? '1' : '0'); return next; })}
             className="w-full flex items-center justify-between px-3 py-2 text-[10px] text-gray-500 uppercase tracking-wider hover:bg-gray-800/50 transition-colors"
           >
             <span>📡 Discovery Namespaces {totalNS > 0 && <span className={activeNS === totalNS ? 'text-green-600' : 'text-orange-500'}>({activeNS}/{totalNS})</span>}</span>
@@ -360,9 +395,18 @@ export function Sidebar({
                       <div className="flex justify-between">
                         <span className="text-gray-500">Namespace</span>
                         <span className="font-mono text-[10px] truncate max-w-[130px]">
-                          <span className="text-gray-600">{APP_PREFIX}-ns-</span>
-                          <span className="text-cyan-400">{ns.slug}</span>
-                          <span className="text-gray-600">-1</span>
+                          {ns.advanced ? (
+                            <>
+                              <span className="text-cyan-400">{ns.slug}</span>
+                              <span className="text-gray-600">-{ns.level || 1}</span>
+                            </>
+                          ) : (
+                            <>
+                              <span className="text-gray-600">{APP_PREFIX}-ns-</span>
+                              <span className="text-cyan-400">{ns.slug}</span>
+                              <span className="text-gray-600">-1</span>
+                            </>
+                          )}
                         </span>
                       </div>
                       {nsDiscID && (
@@ -410,24 +454,36 @@ export function Sidebar({
                 onSubmit={(e) => {
                   e.preventDefault();
                   const name = nsInput.trim();
-                  if (name) { onJoinCustomNS(name); setNsInput(''); }
+                  if (name) { onJoinCustomNS(name, nsAdvanced || undefined); setNsInput(''); setNsAdvanced(false); }
                 }}
-                className="flex gap-1 mt-1"
+                className="mt-1"
               >
-                <input
-                  type="text"
-                  value={nsInput}
-                  onChange={(e) => setNsInput(e.target.value)}
-                  placeholder="Join namespace…"
-                  className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-600"
-                />
+                <div className="flex gap-1">
+                  <input
+                    type="text"
+                    value={nsInput}
+                    onChange={(e) => setNsInput(e.target.value)}
+                    placeholder={nsAdvanced ? 'Base pattern (e.g. myco-room1)' : 'Join namespace…'}
+                    className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-600"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!nsInput.trim()}
+                    className="shrink-0 p-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded transition-colors"
+                    title="Join namespace"
+                  >
+                    <Plus size={12} />
+                  </button>
+                </div>
                 <button
-                  type="submit"
-                  disabled={!nsInput.trim()}
-                  className="shrink-0 p-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded transition-colors"
-                  title="Join namespace"
+                  type="button"
+                  onClick={() => setNsAdvanced(v => !v)}
+                  className={clsx(
+                    'mt-1 text-[10px] px-1.5 py-0.5 rounded transition-colors',
+                    nsAdvanced ? 'text-cyan-400 bg-cyan-900/30' : 'text-gray-600 hover:text-gray-400'
+                  )}
                 >
-                  <Plus size={12} />
+                  {nsAdvanced ? '✓ Advanced (no prefix)' : 'Advanced'}
                 </button>
               </form>
             </div>
@@ -570,6 +626,25 @@ export function Sidebar({
             </div>
           )}
         </div>
+      </div>
+
+      {/* Footer — Learn More + Version */}
+      <div className="shrink-0 px-3 py-2 border-t border-gray-800 flex items-center justify-center gap-1">
+        <button
+          onClick={onShowLearnMore}
+          className="border text-[10px] font-mono px-1.5 py-0.5 rounded transition-colors bg-gray-800 border-gray-700 text-gray-500 hover:text-gray-400"
+        >
+          Learn More
+        </button>
+        <button
+          onClick={onToggleLogs}
+          className={clsx(
+            'border text-[10px] font-mono px-1.5 py-0.5 rounded transition-colors',
+            showLogs ? 'bg-blue-900/50 border-blue-700 text-blue-400' : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-gray-400'
+          )}
+        >
+          Version #0.{buildNumber}
+        </button>
       </div>
     </div>
   );

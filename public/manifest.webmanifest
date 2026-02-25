@@ -1,6 +1,6 @@
 {
-  "name": "myapp P2P",
-  "short_name": "myapp",
+  "name": "PeerNS",
+  "short_name": "PeerNS",
   "description": "Serverless peer-to-peer messenger",
   "theme_color": "#0d1117",
   "background_color": "#0d1117",

@@ -1,10 +1,13 @@
 import { Peer } from 'peerjs';
 
-export const APP_PREFIX = 'myapp';
+export const APP_PREFIX = 'peerns';
+export const APP_NAME = 'PeerNS';
 export const TTL = 90000;
 export const PING_IV = 60000;
 export const IP_REFRESH = 5 * 60 * 1000;
 export const CHUNK_SIZE = 16000;
+export const RVZ_WINDOW = 10 * 60 * 1000;   // 10 minute time windows
+export const RVZ_SWEEP_IV = 5 * 60 * 1000;  // sweep unreachable contacts every 5 min
 
 export interface PeerInfo {
   discoveryID: string;
@@ -30,19 +33,29 @@ export interface Contact {
   pendingVerified?: boolean;     // signature verified at request time
 }
 
+export interface NSConfig {
+  label: string;
+  makeRouterID: (level: number) => string;
+  makeDiscID: (uuid: string) => string;
+  makePeerSlotID: () => string;
+}
+
 export interface CustomNS {
   name: string;
   slug: string;
   isRouter: boolean;
   level: number;
   offline: boolean;
+  advanced?: boolean;
   registry: Record<string, PeerInfo>;
+  joinStatus?: 'joining' | 'peer-slot' | null;
+  joinAttempt?: number;
 }
 
 export interface ChatMessage {
   id: string;
   dir: 'sent' | 'recv';
-  type?: 'text' | 'file';
+  type?: 'text' | 'file' | 'call';
   content?: string;
   name?: string;
   tid?: string;
@@ -52,6 +65,10 @@ export interface ChatMessage {
   edited?: boolean;
   deleted?: boolean;
   retries?: number;
+  // Call log fields
+  callKind?: 'audio' | 'video' | 'screen';
+  callDuration?: number;
+  callResult?: 'answered' | 'missed' | 'rejected' | 'cancelled';
 }
 
 export interface FileTransfer {

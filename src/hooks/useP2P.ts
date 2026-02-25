@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { p2p } from '../lib/p2p';
-import { Contact, ChatMessage, PeerInfo, CustomNS } from '../lib/types';
+import { Contact, ChatMessage, PeerInfo, CustomNS, APP_PREFIX } from '../lib/types';
 
 export function useP2P() {
   const [status, setStatus] = useState({
@@ -20,11 +20,11 @@ export function useP2P() {
   const [registry, setRegistry] = useState<Record<string, PeerInfo>>({});
   const [chats, setChats] = useState<Record<string, ChatMessage[]>>({});
   const [logs, setLogs] = useState<{ msg: string; type: string; ts: number }[]>([]);
-  const [offlineMode, setOfflineModeState] = useState(() => !!localStorage.getItem('myapp-offline'));
-  const [namespaceOffline, setNamespaceOfflineState] = useState(() => !!localStorage.getItem('myapp-ns-offline'));
+  const [offlineMode, setOfflineModeState] = useState(() => !!localStorage.getItem(`${APP_PREFIX}-offline`));
+  const [namespaceOffline, setNamespaceOfflineState] = useState(() => !!localStorage.getItem(`${APP_PREFIX}-ns-offline`));
   const [customNamespaces, setCustomNamespaces] = useState<Record<string, CustomNS>>(() => p2p.customNamespaces);
   const [lastRead, setLastRead] = useState<Record<string, number>>(() => {
-    try { return JSON.parse(localStorage.getItem('myapp-lastread') || '{}'); } catch { return {}; }
+    try { return JSON.parse(localStorage.getItem(`${APP_PREFIX}-lastread`) || '{}'); } catch { return {}; }
   });
 
   useEffect(() => {
@@ -86,7 +86,7 @@ export function useP2P() {
   const markRead = useCallback((pid: string) => {
     setLastRead((prev: Record<string, number>) => {
       const next = { ...prev, [pid]: Date.now() };
-      localStorage.setItem('myapp-lastread', JSON.stringify(next));
+      localStorage.setItem(`${APP_PREFIX}-lastread`, JSON.stringify(next));
       return next;
     });
   }, []);
@@ -103,7 +103,7 @@ export function useP2P() {
   const retryMessage = useCallback((pid: string, id: string) => p2p.retryMessage(pid, id), []);
   const updateName = useCallback((name: string) => p2p.updateFriendlyName(name), []);
   const acceptIncoming = useCallback((pid: string) => p2p.acceptIncomingRequest(pid), []);
-  const joinCustomNS = useCallback((name: string) => p2p.joinCustomNamespace(name), []);
+  const joinCustomNS = useCallback((name: string, advanced?: boolean) => p2p.joinCustomNamespace(name, advanced), []);
   const leaveCustomNS = useCallback((slug: string) => p2p.leaveCustomNamespace(slug), []);
   const toggleCustomNSOffline = useCallback((slug: string, offline: boolean) => p2p.setCustomNSOffline(slug, offline), []);
   const setOfflineMode = useCallback((offline: boolean) => {

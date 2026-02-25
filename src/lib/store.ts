@@ -1,6 +1,6 @@
-import { Contact, ChatMessage } from './types';
+import { Contact, ChatMessage, APP_PREFIX } from './types';
 
-const IDB_NAME = 'myapp-files';
+const IDB_NAME = `${APP_PREFIX}-files`;
 const IDB_STORE = 'files';
 
 export function saveContacts(contacts: Record<string, Contact>) {
@@ -15,7 +15,7 @@ export function saveContacts(contacts: Record<string, Contact>) {
         lastSeen: contacts[pid].lastSeen,
       };
     });
-    localStorage.setItem('myapp-contacts', JSON.stringify(clean));
+    localStorage.setItem(`${APP_PREFIX}-contacts`, JSON.stringify(clean));
   } catch (e) {
     console.error('localStorage save error:', e);
   }
@@ -23,7 +23,7 @@ export function saveContacts(contacts: Record<string, Contact>) {
 
 export function loadContacts(): Record<string, Contact> {
   try {
-    const c = localStorage.getItem('myapp-contacts');
+    const c = localStorage.getItem(`${APP_PREFIX}-contacts`);
     return c ? JSON.parse(c) : {};
   } catch (e) {
     return {};
@@ -32,7 +32,7 @@ export function loadContacts(): Record<string, Contact> {
 
 export function saveChats(chats: Record<string, ChatMessage[]>) {
   try {
-    localStorage.setItem('myapp-chats', JSON.stringify(chats));
+    localStorage.setItem(`${APP_PREFIX}-chats`, JSON.stringify(chats));
   } catch (e) {
     console.error('localStorage save error:', e);
   }
@@ -40,7 +40,7 @@ export function saveChats(chats: Record<string, ChatMessage[]>) {
 
 export function loadChats(): Record<string, ChatMessage[]> {
   try {
-    const h = localStorage.getItem('myapp-chats');
+    const h = localStorage.getItem(`${APP_PREFIX}-chats`);
     return h ? JSON.parse(h) : {};
   } catch (e) {
     return {};
@@ -50,7 +50,7 @@ export function loadChats(): Record<string, ChatMessage[]> {
 export function saveFileMeta(tid: string, name: string, size: number, receivedAt: number) {
   try {
     localStorage.setItem(
-      'myapp-filemeta-' + tid,
+      `${APP_PREFIX}-filemeta-` + tid,
       JSON.stringify({
         tid,
         name,
@@ -66,7 +66,7 @@ export function saveFileMeta(tid: string, name: string, size: number, receivedAt
 
 export function loadFileMeta(tid: string) {
   try {
-    const m = localStorage.getItem('myapp-filemeta-' + tid);
+    const m = localStorage.getItem(`${APP_PREFIX}-filemeta-` + tid);
     return m ? JSON.parse(m) : null;
   } catch (e) {
     return null;

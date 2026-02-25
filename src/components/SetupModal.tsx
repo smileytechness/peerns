@@ -1,4 +1,6 @@
 import React, { useState } from 'react';
+import { APP_NAME } from '../lib/types';
+import { LearnMore } from './LearnMore';
 
 interface SetupModalProps {
   onJoin: (name: string) => void;
@@ -6,6 +8,7 @@ interface SetupModalProps {
 
 export function SetupModal({ onJoin }: SetupModalProps) {
   const [name, setName] = useState('');
+  const [showLearnMore, setShowLearnMore] = useState(false);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -14,10 +17,14 @@ export function SetupModal({ onJoin }: SetupModalProps) {
     }
   };
 
+  if (showLearnMore) {
+    return <LearnMore onClose={() => setShowLearnMore(false)} />;
+  }
+
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 anim-fade-in">
       <div className="bg-gray-900 border border-gray-800 p-8 rounded-xl w-80 shadow-2xl anim-scale-up">
-        <h2 className="text-2xl font-bold text-blue-500 mb-2">myapp</h2>
+        <h2 className="text-2xl font-bold text-blue-500 mb-2">{APP_NAME}</h2>
         <p className="text-gray-400 text-sm mb-6">Serverless P2P — proof of concept</p>
         <form onSubmit={handleSubmit}>
           <input
@@ -35,6 +42,12 @@ export function SetupModal({ onJoin }: SetupModalProps) {
             Join
           </button>
         </form>
+        <button
+          onClick={() => setShowLearnMore(true)}
+          className="w-full mt-3 text-[12px] text-blue-400 hover:text-blue-300 transition-colors"
+        >
+          Learn more about {APP_NAME}
+        </button>
       </div>
     </div>
   );

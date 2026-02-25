@@ -10,7 +10,9 @@ import { MediaOverlay } from './components/MediaOverlay';
 import { CallingOverlay } from './components/CallingOverlay';
 import { NamespaceModal } from './components/NamespaceModal';
 import { ProfileModal } from './components/ProfileModal';
+import { LearnMore } from './components/LearnMore';
 import { p2p } from './lib/p2p';
+import { APP_PREFIX, APP_NAME } from './lib/types';
 import { BUILD } from './lib/version';
 import { clsx } from 'clsx';
 
@@ -106,6 +108,7 @@ export default function App() {
     customNamespaces,
     setOfflineMode,
     setNamespaceOffline,
+    p2p,
   } = useP2P();
 
   const [activeChat, setActiveChat] = useState<string | null>(null);
@@ -115,11 +118,13 @@ export default function App() {
   const [showConnect, setShowConnect] = useState(false);
   const [showNamespaceInfo, setShowNamespaceInfo] = useState(false);
   const [customNSInfoSlug, setCustomNSInfoSlug] = useState<string | null>(null);
-  const [setupNeeded, setSetupNeeded] = useState(!localStorage.getItem('myapp-name'));
+  const [setupNeeded, setSetupNeeded] = useState(!localStorage.getItem(`${APP_PREFIX}-name`));
   const [contactModalPid, setContactModalPid] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [showLogs, setShowLogs] = useState(false);
+  const [showLearnMore, setShowLearnMore] = useState(false);
 
+  const [contactPubkeyFP, setContactPubkeyFP] = useState<string | null>(null);
   const [connRequest, setConnRequest] = useState<{ fname: string; publicKey?: string; fingerprint?: string; verified?: boolean; accept: () => void; reject: () => void; saveForLater: () => void } | null>(null);
   const [pendingConnectPID] = useState<string | null>(() => {
     try { return new URL(window.location.href).searchParams.get('connect'); } catch { return null; }
@@ -127,6 +132,8 @@ export default function App() {
   const [incomingCall, setIncomingCall] = useState<{ call: any; fname: string; kind: string } | null>(null);
   const [callingState, setCallingState] = useState<{ fname: string; kind: 'audio' | 'video' | 'screen'; call: any; stream: MediaStream; cameraStream?: MediaStream } | null>(null);
   const [activeCall, setActiveCall] = useState<{ stream: MediaStream; localStream?: MediaStream; cameraStream?: MediaStream; fname: string; kind: string; call: any } | null>(null);
+  const [callMinimized, setCallMinimized] = useState(false);
+  const [callDuration, setCallDuration] = useState(0);
   const [callCountdown, setCallCountdown] = useState(60);
   const [reqCountdown, setReqCountdown] = useState(60);
 
@@ -137,6 +144,15 @@ export default function App() {
 
   // Keep activeChatRef in sync so event handlers can read current value
   useEffect(() => { activeChatRef.current = activeChat; }, [activeChat]);
+
+  // Compute contact's pubkey fingerprint when modal opens
+  useEffect(() => {
+    if (contactModalPid && peers[contactModalPid]?.publicKey) {
+      p2p.computeFingerprint(peers[contactModalPid].publicKey!).then(setContactPubkeyFP);
+    } else {
+      setContactPubkeyFP(null);
+    }
+  }, [contactModalPid]);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -183,6 +199,14 @@ export default function App() {
     return () => { stopOutgoingRing.current?.(); };
   }, [callingState]);
 
+  // ── Active call duration timer ──────────────────────────────────────────────
+  useEffect(() => {
+    if (!activeCall) { setCallDuration(0); setCallMinimized(false); return; }
+    setCallDuration(0);
+    const t = setInterval(() => setCallDuration(d => d + 1), 1000);
+    return () => clearInterval(t);
+  }, [activeCall]);
+
   // ── Auto-decline incoming call after 60s ─────────────────────────────────
   useEffect(() => {
     if (!incomingCall) { setCallCountdown(60); return; }
@@ -209,9 +233,34 @@ export default function App() {
     }
   }, [connRequest]);
 
+  // Handle contact migration — redirect activeChat if old PID was migrated
+  useEffect(() => {
+    const handler = (e: any) => {
+      const { oldPID, newPID } = e.detail;
+      setActiveChat(prev => prev === oldPID ? newPID : prev);
+      setContactModalPid(prev => prev === oldPID ? newPID : prev);
+    };
+    p2p.addEventListener('contact-migrated', handler);
+    return () => p2p.removeEventListener('contact-migrated', handler);
+  }, []);
+
   useEffect(() => {
     const onRequest = (e: any) => setConnRequest(e.detail);
-    const onIncomingCall = (e: any) => setIncomingCall(e.detail);
+    const onIncomingCall = (e: any) => {
+      const { call, fname, kind } = e.detail;
+      setIncomingCall(e.detail);
+      // Detect missed call: caller hangs up before we answer/reject
+      const missedHandler = () => {
+        setIncomingCall(prev => {
+          if (prev && prev.call === call) {
+            p2p.addCallLog(call.peer, 'recv', kind as 'audio' | 'video' | 'screen', 'missed');
+            return null;
+          }
+          return prev;
+        });
+      };
+      call.on('close', missedHandler);
+    };
     p2p.addEventListener('connection-request', onRequest);
     p2p.addEventListener('incoming-call', onIncomingCall);
     return () => {
@@ -221,7 +270,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const name = localStorage.getItem('myapp-name');
+    const name = localStorage.getItem(`${APP_PREFIX}-name`);
     if (name) {
       setSetupNeeded(false);
       init(name);
@@ -281,14 +330,29 @@ export default function App() {
     }
   }, []);
 
+  // Refs to track call timing for call log duration
+  const outCallStartRef = useRef<number>(0);
+  const outCallAnsweredRef = useRef<boolean>(false);
+  const outCallPidRef = useRef<string | null>(null);
+  const outCallKindRef = useRef<'audio' | 'video' | 'screen'>('audio');
+  const inCallStartRef = useRef<number>(0);
+  const inCallPidRef = useRef<string | null>(null);
+  const inCallKindRef = useRef<'audio' | 'video' | 'screen'>('audio');
+
   const handleCall = async (kind: 'audio' | 'video' | 'screen') => {
     if (!activeChat) return;
     const fname = peers[activeChat]?.friendlyName || activeChat;
+    const callPid = activeChat;
     try {
       const { call, stream, cameraStream } = await startCall(activeChat, kind);
       setCallingState({ fname, kind, call, stream, cameraStream });
+      outCallAnsweredRef.current = false;
+      outCallPidRef.current = callPid;
+      outCallKindRef.current = kind;
 
       call.on('stream', (remoteStream: MediaStream) => {
+        outCallAnsweredRef.current = true;
+        outCallStartRef.current = Date.now();
         stopOutgoingRing.current?.();
         setCallingState(null);
         setActiveCall({
@@ -301,6 +365,14 @@ export default function App() {
         });
       });
       call.on('close', () => {
+        if (outCallAnsweredRef.current && outCallStartRef.current) {
+          const duration = Math.floor((Date.now() - outCallStartRef.current) / 1000);
+          p2p.addCallLog(callPid, 'sent', kind, 'answered', duration);
+        } else {
+          p2p.addCallLog(callPid, 'sent', kind, 'cancelled');
+        }
+        outCallAnsweredRef.current = false;
+        outCallStartRef.current = 0;
         setCallingState(null);
         setActiveCall(null);
         stream.getTracks().forEach((t: MediaStreamTrack) => t.stop());
@@ -309,7 +381,6 @@ export default function App() {
     } catch (e: any) {
       setCallingState(null);
       if (e?.message) {
-        // Surface the error visually — for now use the log panel (already shown at bottom)
         console.error('Call failed:', e.message);
       }
     }
@@ -327,19 +398,43 @@ export default function App() {
   const answerCall = async () => {
     if (!incomingCall) return;
     const { call, kind, fname } = incomingCall;
+    const callPid = call.peer;
     try {
       let localStream: MediaStream | undefined;
-      if (kind !== 'screen') {
+      if (kind === 'screen') {
+        // Screen share: answer with audio so caller gets a stream event back
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch {
+          // Mic unavailable — create a silent audio track so PeerJS fires the stream event on caller
+          const ctx = new AudioContext();
+          const oscillator = ctx.createOscillator();
+          const dest = ctx.createMediaStreamDestination();
+          oscillator.connect(dest);
+          oscillator.start();
+          const silentTrack = dest.stream.getAudioTracks()[0];
+          silentTrack.enabled = false; // muted
+          localStream = new MediaStream([silentTrack]);
+        }
+      } else {
         localStream = await navigator.mediaDevices.getUserMedia(
           kind === 'audio' ? { audio: true } : { audio: true, video: true }
         );
       }
       call.answer(localStream);
+      inCallPidRef.current = callPid;
+      inCallKindRef.current = kind as 'audio' | 'video' | 'screen';
       call.on('stream', (remoteStream: MediaStream) => {
+        inCallStartRef.current = Date.now();
         setActiveCall({ stream: remoteStream, localStream, fname, kind, call });
         setIncomingCall(null);
       });
       call.on('close', () => {
+        if (inCallStartRef.current) {
+          const duration = Math.floor((Date.now() - inCallStartRef.current) / 1000);
+          p2p.addCallLog(callPid, 'recv', kind as 'audio' | 'video' | 'screen', 'answered', duration);
+        }
+        inCallStartRef.current = 0;
         setActiveCall(null);
         if (localStream) localStream.getTracks().forEach((t: MediaStreamTrack) => t.stop());
       });
@@ -351,7 +446,11 @@ export default function App() {
   };
 
   const rejectCall = () => {
-    if (incomingCall) { incomingCall.call.close(); setIncomingCall(null); }
+    if (incomingCall) {
+      p2p.addCallLog(incomingCall.call.peer, 'recv', incomingCall.kind as 'audio' | 'video' | 'screen', 'rejected');
+      incomingCall.call.close();
+      setIncomingCall(null);
+    }
   };
 
   const endCall = () => {
@@ -373,7 +472,7 @@ export default function App() {
       {/* Main content: sidebar + chat */}
       <div className="flex flex-1 overflow-hidden min-h-0">
         <Sidebar
-          myName={localStorage.getItem('myapp-name') || status.pid}
+          myName={localStorage.getItem(`${APP_PREFIX}-name`) || status.pid}
           myPid={status.pid}
           myFingerprint={status.pubkeyFingerprint}
           persConnected={status.persConnected}
@@ -408,6 +507,10 @@ export default function App() {
           onJoinCustomNS={joinCustomNS}
           onToggleCustomNSOffline={toggleCustomNSOffline}
           onShowCustomNSInfo={(slug) => setCustomNSInfoSlug(slug)}
+          onShowLearnMore={() => setShowLearnMore(true)}
+          onToggleLogs={() => setShowLogs(v => !v)}
+          showLogs={showLogs}
+          buildNumber={BUILD}
         />
 
         <div className={clsx('flex-1 flex flex-col min-w-0', !activeChat && sidebarOpen ? 'hidden md:flex' : 'flex')}>
@@ -459,16 +562,8 @@ export default function App() {
         </div>
       )}
 
-      {/* Version badge */}
-      <button
-        onClick={() => setShowLogs(v => !v)}
-        className={clsx(
-          'fixed bottom-2 right-2 z-[200] border text-[10px] font-mono px-1.5 py-0.5 rounded transition-colors',
-          showLogs ? 'bg-blue-900/50 border-blue-700 text-blue-400' : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-gray-400'
-        )}
-      >
-        Version #0.{BUILD}
-      </button>
+
+      {showLearnMore && <LearnMore onClose={() => setShowLearnMore(false)} />}
 
       {/* Toast notifications */}
       <div className="fixed bottom-28 left-2 z-[150] flex flex-col gap-2 pointer-events-none">
@@ -489,6 +584,9 @@ export default function App() {
         <ContactModal
           pid={contactModalPid}
           contact={peers[contactModalPid]}
+          pubkeyFingerprint={contactPubkeyFP}
+          sharedKeyFingerprint={p2p.getSharedKeyFingerprint(contactModalPid)}
+          p2p={p2p}
           onClose={() => setContactModalPid(null)}
           onPing={(pid) => pingContact(pid)}
           onChat={(pid) => { setContactModalPid(null); handleSelectChat(pid); }}
@@ -500,7 +598,7 @@ export default function App() {
 
       {showProfile && (
         <ProfileModal
-          name={localStorage.getItem('myapp-name') || status.pid}
+          name={localStorage.getItem(`${APP_PREFIX}-name`) || status.pid}
           pid={status.pid}
           publicKey={p2p.publicKeyStr}
           fingerprint={status.pubkeyFingerprint}
@@ -521,6 +619,8 @@ export default function App() {
           namespaceLevel={status.namespaceLevel}
           isRouter={status.role.startsWith('Router')}
           registry={registry}
+          joinStatus={status.joinStatus}
+          joinAttempt={status.joinAttempt}
           onClose={() => setShowNamespaceInfo(false)}
         />
       )}
@@ -528,16 +628,22 @@ export default function App() {
       {customNSInfoSlug && customNamespaces[customNSInfoSlug] && (() => {
         const ns = customNamespaces[customNSInfoSlug];
         const myEntry = (Object.values(ns.registry) as any[]).find(r => r.isMe);
+        const endpoint = ns.advanced
+          ? `${ns.slug}-${ns.level || 1}`
+          : `${APP_PREFIX}-ns-${ns.slug}-${ns.level || 1}`;
         return (
           <NamespaceModal
             namespaceName={ns.name}
             role={ns.isRouter ? `Router L${ns.level}` : `Peer L${ns.level}`}
             ip={ns.slug}
-            routerEndpoint={`myapp-ns-${ns.slug}-${ns.level || 1}`}
+            routerEndpoint={endpoint}
             discID={myEntry?.discoveryID || ''}
             namespaceLevel={ns.level}
             isRouter={ns.isRouter}
             registry={ns.registry}
+            advanced={ns.advanced}
+            joinStatus={ns.joinStatus}
+            joinAttempt={ns.joinAttempt}
             onLeave={() => leaveCustomNS(customNSInfoSlug)}
             onClose={() => setCustomNSInfoSlug(null)}
           />
@@ -635,7 +741,7 @@ export default function App() {
         />
       )}
 
-      {activeCall && (
+      {activeCall && !callMinimized && (
         <MediaOverlay
           stream={activeCall.stream}
           localStream={activeCall.localStream}
@@ -643,7 +749,35 @@ export default function App() {
           fname={activeCall.fname}
           kind={activeCall.kind}
           onEnd={endCall}
+          onMinimize={() => setCallMinimized(true)}
         />
+      )}
+
+      {/* Minimized call bar */}
+      {activeCall && callMinimized && (
+        <div className="fixed top-0 left-0 right-0 z-[90] bg-green-700 px-4 py-2 flex items-center justify-between shadow-lg">
+          <div className="flex items-center gap-2 text-white text-sm">
+            <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
+            In call with <span className="font-semibold">{activeCall.fname}</span>
+            <span className="font-mono text-green-200 text-xs ml-1">
+              {Math.floor(callDuration / 60).toString().padStart(2, '0')}:{(callDuration % 60).toString().padStart(2, '0')}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setCallMinimized(false)}
+              className="text-white text-xs bg-green-800 hover:bg-green-900 px-3 py-1 rounded transition-colors"
+            >
+              Expand
+            </button>
+            <button
+              onClick={endCall}
+              className="text-white text-xs bg-red-600 hover:bg-red-700 px-3 py-1 rounded transition-colors"
+            >
+              End
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );

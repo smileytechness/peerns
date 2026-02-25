@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import QRCode from 'qrcode';
 import { Copy, Share2, X, Link } from 'lucide-react';
+import { APP_NAME } from '../lib/types';
 
 interface ShareModalProps {
   pid: string;
@@ -33,7 +34,7 @@ export function ShareModal({ pid, onClose }: ShareModalProps) {
     if (navigator.share) {
       try {
         await navigator.share({
-          title: 'Connect on myapp',
+          title: `Connect on ${APP_NAME}`,
           url: url,
         });
       } catch (err) {

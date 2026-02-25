@@ -110,7 +110,7 @@ export function makeDiscID(ip: string, uuid: string): string {
 }
 
 export function extractDiscUUID(did: string): string {
-  // format: myapp-{ip}-{uuid}
+  // format: {APP_PREFIX}-{ip}-{uuid}
   const parts = did.split('-');
   return parts[parts.length - 1];
 }
@@ -126,4 +126,22 @@ export function makeCustomRouterID(slug: string, level: number): string {
 
 export function makeCustomDiscID(slug: string, uuid: string): string {
   return `${APP_PREFIX}-ns-${slug}-${uuid}`;
+}
+
+export function makePeerSlotID(ip: string): string {
+  return `${APP_PREFIX}-${ip.replace(/\./g, '-')}-p1`;
+}
+
+// ─── Rendezvous ID factories ────────────────────────────────────────────────
+
+export function makeRendezvousRouterID(slug: string, level: number): string {
+  return `${APP_PREFIX}-rvz-${slug}-${level}`;
+}
+
+export function makeRendezvousDiscID(slug: string, uuid: string): string {
+  return `${APP_PREFIX}-rvz-${slug}-${uuid}`;
+}
+
+export function makeRendezvousPeerSlotID(slug: string): string {
+  return `${APP_PREFIX}-rvz-${slug}-p1`;
 }

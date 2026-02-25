@@ -1,8 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ChatMessage } from '../lib/types';
 import { loadFile, loadFileMeta } from '../lib/store';
-import { Send, Paperclip, Phone, Video, Monitor, Download, File, ArrowLeft, Info, Pencil, Trash2, RotateCcw, Check, CheckCheck, Clock, AlertCircle } from 'lucide-react';
+import { Send, Paperclip, Phone, Video, Monitor, Download, File, ArrowLeft, Info, Pencil, Trash2, RotateCcw, Check, CheckCheck, Clock, AlertCircle, ChevronDown, PhoneIncoming, PhoneOutgoing, PhoneMissed } from 'lucide-react';
 import { clsx } from 'clsx';
+
+function formatCallDuration(s: number) {
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}:${sec.toString().padStart(2, '0')}`;
+}
 
 interface ChatAreaProps {
   pid: string;
@@ -72,6 +79,32 @@ const MessageItem: React.FC<{
     );
   }
 
+  if (msg.type === 'call') {
+    const icon = msg.callKind === 'video' ? <Video size={14} />
+               : msg.callKind === 'screen' ? <Monitor size={14} />
+               : <Phone size={14} />;
+    const label = msg.dir === 'sent' ? 'Outgoing' : 'Incoming';
+    const resultText = msg.callResult === 'answered'
+      ? (msg.callDuration ? formatCallDuration(msg.callDuration) : '')
+      : msg.callResult === 'missed' ? 'Missed'
+      : msg.callResult === 'rejected' ? 'Declined'
+      : 'Cancelled';
+    const color = msg.callResult === 'answered' ? 'text-green-400'
+                : msg.callResult === 'missed' ? 'text-red-400'
+                : 'text-gray-400';
+
+    return (
+      <div className="flex justify-center mb-2 self-center">
+        <div className={clsx('flex items-center gap-2 text-xs px-3 py-1.5 rounded-full bg-gray-800/60', color)}>
+          {icon}
+          <span>{label} {msg.callKind} call</span>
+          {resultText && <span className="opacity-70">&middot; {resultText}</span>}
+          <span className="text-gray-600 text-[10px]">{new Date(msg.ts).toLocaleTimeString()}</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       className={clsx('flex flex-col mb-2 max-w-[75%]', isSent ? 'self-end items-end' : 'self-start items-start')}
@@ -79,7 +112,7 @@ const MessageItem: React.FC<{
       onMouseLeave={() => { setShowActions(false); }}
     >
       {/* Action buttons (hover, sent messages only) */}
-      {isSent && showActions && !editing && msg.type === 'text' && !msg.deleted && (
+      {isSent && showActions && !editing && !msg.deleted && (
         <div className="flex gap-1 mb-1">
           {canEdit && (
             <button
@@ -179,6 +212,62 @@ const MessageItem: React.FC<{
   );
 };
 
+function CallDropdown({ onCall }: { onCall: (kind: 'audio' | 'video' | 'screen') => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    if (open) document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative">
+      <div className="flex">
+        <button
+          onClick={() => onCall('audio')}
+          className="p-2 hover:bg-gray-800 rounded-l text-gray-400 hover:text-white"
+          title="Audio Call"
+        >
+          <Phone size={17} />
+        </button>
+        <button
+          onClick={() => setOpen(!open)}
+          className="p-1 hover:bg-gray-800 rounded-r text-gray-400 hover:text-white border-l border-gray-700"
+          title="Call options"
+        >
+          <ChevronDown size={14} />
+        </button>
+      </div>
+      {open && (
+        <div className="absolute right-0 top-full mt-1 bg-gray-800 border border-gray-700 rounded-lg shadow-xl z-20 w-44 py-1 anim-scale-up origin-top-right">
+          <button
+            onClick={() => { onCall('audio'); setOpen(false); }}
+            className="flex items-center gap-2 w-full px-3 py-2 text-sm text-gray-200 hover:bg-gray-700 transition-colors"
+          >
+            <Phone size={14} /> Audio call
+          </button>
+          <button
+            onClick={() => { onCall('video'); setOpen(false); }}
+            className="flex items-center gap-2 w-full px-3 py-2 text-sm text-gray-200 hover:bg-gray-700 transition-colors"
+          >
+            <Video size={14} /> Video call
+          </button>
+          <button
+            onClick={() => { onCall('screen'); setOpen(false); }}
+            className="flex items-center gap-2 w-full px-3 py-2 text-sm text-gray-200 hover:bg-gray-700 transition-colors"
+          >
+            <Monitor size={14} /> Screen share
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ChatArea({ pid, friendlyName, messages, onSendMessage, onSendFile, onCall, onBack, onContactInfo, onEditMessage, onDeleteMessage, onRetryMessage }: ChatAreaProps) {
   const [input, setInput] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -221,28 +310,20 @@ export function ChatArea({ pid, friendlyName, messages, onSendMessage, onSendFil
           >
             <div className="font-semibold text-gray-200">{friendlyName}</div>
             <div className="text-[11px] text-gray-500 font-mono">
-              {pid.length > 28 ? pid.slice(0, 28) + '…' : pid}
+              {pid.length > 28 ? pid.slice(0, 28) + '...' : pid}
             </div>
           </button>
         </div>
-        <div className="flex gap-1">
+        <div className="flex items-center gap-1">
           <button onClick={onContactInfo} className="p-2 hover:bg-gray-800 rounded text-gray-400 hover:text-white" title="Contact Info">
             <Info size={17} />
           </button>
-          <button onClick={() => onCall('audio')} className="p-2 hover:bg-gray-800 rounded text-gray-400 hover:text-white" title="Audio Call">
-            <Phone size={17} />
-          </button>
-          <button onClick={() => onCall('video')} className="p-2 hover:bg-gray-800 rounded text-gray-400 hover:text-white" title="Video Call">
-            <Video size={17} />
-          </button>
-          <button onClick={() => onCall('screen')} className="p-2 hover:bg-gray-800 rounded text-gray-400 hover:text-white" title="Screen Share">
-            <Monitor size={17} />
-          </button>
+          <CallDropdown onCall={onCall} />
         </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-1">
-        {messages.map((msg) => (
+        {[...messages].sort((a, b) => a.ts - b.ts).map((msg) => (
           <MessageItem
             key={msg.id || msg.ts}
             msg={msg}

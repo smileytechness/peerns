@@ -30,7 +30,7 @@ function getIDError(val: string): string | null {
     return 'This looks like a discovery ID. Discovery IDs include an IP address segment. Ask the other person for their Persistent ID from the Share screen.';
   }
   if (parts.length === 2 && !/^[a-f0-9]{32}$/.test(parts[1])) {
-    return 'The ID format is invalid. A Persistent ID looks like: myapp-a1b2c3d4… (32 hex characters after the dash).';
+    return `The ID format is invalid. A Persistent ID looks like: ${APP_PREFIX}-a1b2c3d4… (32 hex characters after the dash).`;
   }
   return null;
 }
@@ -99,7 +99,7 @@ export function ConnectModal({ onConnect, onClose }: ConnectModalProps) {
                 type="text"
                 value={pid}
                 onChange={(e) => { setPid(e.target.value); setError(''); }}
-                placeholder="myapp-a1b2c3d4e5f6…"
+                placeholder={`${APP_PREFIX}-a1b2c3d4e5f6…`}
                 className="w-full bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-blue-500 font-mono"
                 autoFocus
               />

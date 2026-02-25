@@ -1,11 +1,15 @@
 import React, { useState } from 'react';
-import { X, Copy, Activity, MessageCircle, Trash2, Key, CheckCircle } from 'lucide-react';
+import { X, Copy, Activity, MessageCircle, Trash2, Key, CheckCircle, Shield, Eye, EyeOff, AlertTriangle } from 'lucide-react';
 import { Contact } from '../lib/types';
+import { P2PManager } from '../lib/p2p';
 import { clsx } from 'clsx';
 
 interface ContactModalProps {
   pid: string;
   contact: Contact;
+  pubkeyFingerprint?: string | null;
+  sharedKeyFingerprint?: string | null;
+  p2p: P2PManager;
   onClose: () => void;
   onPing: (pid: string) => void;
   onChat: (pid: string) => void;
@@ -21,13 +25,25 @@ function formatLastSeen(ts?: number): string {
   return new Date(ts).toLocaleDateString();
 }
 
-export function ContactModal({ pid, contact, onClose, onPing, onChat, onDelete }: ContactModalProps) {
+export function ContactModal({ pid, contact, pubkeyFingerprint, sharedKeyFingerprint, p2p, onClose, onPing, onChat, onDelete }: ContactModalProps) {
   const isOnline = !!contact.conn?.open;
   const hasKey = !!contact.publicKey;
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [showSharedKey, setShowSharedKey] = useState(false);
+  const [sharedKeyRaw, setSharedKeyRaw] = useState<string | null>(null);
 
   const copy = (text: string) => {
     navigator.clipboard.writeText(text).catch(() => {});
+  };
+
+  const handleRevealKey = async () => {
+    if (showSharedKey) {
+      setShowSharedKey(false);
+      return;
+    }
+    const raw = await p2p.getSharedKeyExport(pid);
+    setSharedKeyRaw(raw);
+    setShowSharedKey(true);
   };
 
   return (
@@ -71,7 +87,7 @@ export function ContactModal({ pid, contact, onClose, onPing, onChat, onDelete }
             </div>
           </div>
 
-          {/* Key fingerprint */}
+          {/* Public Key Hash */}
           <div>
             <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 flex items-center gap-2">
               Public Key
@@ -83,15 +99,79 @@ export function ContactModal({ pid, contact, onClose, onPing, onChat, onDelete }
             </div>
             <div className="flex items-center gap-2 bg-gray-800 rounded-lg px-3 py-2">
               <Key size={12} className={hasKey ? 'text-purple-400' : 'text-gray-600'} />
-              <span className={clsx('font-mono text-[11px] flex-1 break-all', hasKey ? 'text-purple-400' : 'text-gray-600 italic')}>
-                {hasKey ? contact.publicKey!.slice(0, 48) + '…' : 'not yet exchanged'}
+              <span className={clsx('font-mono text-[11px] flex-1', hasKey ? 'text-purple-400' : 'text-gray-600 italic')}>
+                {hasKey ? (pubkeyFingerprint || '...') : 'not yet exchanged'}
               </span>
-              {hasKey && (
-                <button onClick={() => copy(contact.publicKey!)} className="text-gray-500 hover:text-gray-300 shrink-0" title="Copy">
+              {hasKey && pubkeyFingerprint && (
+                <button onClick={() => copy(pubkeyFingerprint)} className="text-gray-500 hover:text-gray-300 shrink-0" title="Copy fingerprint">
                   <Copy size={13} />
                 </button>
               )}
             </div>
+            {hasKey && (
+              <div className="text-[10px] text-gray-600 mt-1">
+                SHA-256 fingerprint of their public key. Verify it matches on the other device.
+              </div>
+            )}
+          </div>
+
+          {/* Shared E2E key */}
+          <div>
+            <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 flex items-center gap-2">
+              Shared Key (E2E)
+              {sharedKeyFingerprint && (
+                <span className="flex items-center gap-0.5 text-green-500 text-[10px]">
+                  <Shield size={10} /> active
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2 bg-gray-800 rounded-lg px-3 py-2">
+              <Shield size={12} className={sharedKeyFingerprint ? 'text-emerald-400' : 'text-gray-600'} />
+              <span className={clsx('font-mono text-[11px] flex-1', sharedKeyFingerprint ? 'text-emerald-400' : 'text-gray-600 italic')}>
+                {sharedKeyFingerprint || 'not yet derived'}
+              </span>
+              {sharedKeyFingerprint && (
+                <button onClick={() => copy(sharedKeyFingerprint)} className="text-gray-500 hover:text-gray-300 shrink-0" title="Copy">
+                  <Copy size={13} />
+                </button>
+              )}
+            </div>
+            {sharedKeyFingerprint && (
+              <div className="text-[10px] text-gray-600 mt-1">
+                Both devices compute the same key. Verify this fingerprint matches on the other device.
+              </div>
+            )}
+
+            {/* Reveal full shared key */}
+            {sharedKeyFingerprint && (
+              <div className="mt-2">
+                <button
+                  onClick={handleRevealKey}
+                  className="flex items-center gap-1 text-[10px] text-gray-500 hover:text-gray-300 transition-colors"
+                >
+                  {showSharedKey ? <EyeOff size={10} /> : <Eye size={10} />}
+                  {showSharedKey ? 'Hide full key' : 'Reveal full key'}
+                </button>
+                {showSharedKey && (
+                  <div className="mt-1.5 bg-red-950/30 border border-red-900/40 rounded-lg p-2">
+                    <div className="flex items-center gap-1 text-[10px] text-red-400 mb-1.5">
+                      <AlertTriangle size={10} />
+                      Do not share this key. It encrypts messages with this contact.
+                    </div>
+                    {sharedKeyRaw ? (
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-[10px] text-gray-400 flex-1 break-all leading-relaxed">{sharedKeyRaw}</span>
+                        <button onClick={() => copy(sharedKeyRaw)} className="text-gray-500 hover:text-gray-300 shrink-0" title="Copy key">
+                          <Copy size={12} />
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="text-[10px] text-gray-600 italic">Key unavailable</span>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Discovery ID if on network */}
