@@ -1,417 +1,222 @@
-# PeerNS — Full Security Audit & Encryption Architecture
+# PeerNS — Revised Full Security Audit
 **Date:** March 2026  
-**Scope:** p2p.ts, p2p-messaging.ts, p2p-group.ts, crypto.ts  
+**Scope:** p2p.ts, p2p-messaging.ts, p2p-group.ts, p2p-handshake.ts, p2p-ns.ts, p2p-rvz.ts, crypto.ts  
+**Revision note:** This document supersedes the original audit. Section 6 of the original audit incorrectly concluded that the static ECDH layer was redundant and recommended its removal. That recommendation is retracted. See §6 for full correction.
 
 ---
 
-## 1. System Overview
+## 1. Security Category Framework
 
-PeerNS is a browser-based peer-to-peer communication platform using WebRTC DataChannels (via PeerJS) for direct peer connections. It supports 1:1 messaging, group chats, file transfer, and audio/video/screen calls. Identity is cryptographically established via ECDSA P-521 key pairs. Shared secrets for encryption are derived via ECDH. All persistent state is stored in `localStorage` and `IndexedDB`.
+This audit evaluates all channels across three distinct threat categories. The original audit collapsed these into only two, which caused the flawed Phase 5 recommendation.
 
----
-
-## 2. Current Cryptographic Architecture
-
-### 2.1 Key Types In Use
-
-| Key | Algorithm | Purpose | Where Generated | Where Stored |
-|---|---|---|---|---|
-| ECDSA private key | P-521 | Sign messages, prove identity | `generateKeyPair()` on first run | `localStorage` — **plaintext base64** |
-| ECDSA public key | P-521 | Verify signatures, shared with peers | Same | `localStorage` — plaintext (acceptable) |
-| ECDH private key | P-521 (re-imported) | Derive shared secrets | Derived from ECDSA private key at runtime | Memory only |
-| Pairwise shared key | AES-256-GCM | Encrypt 1:1 messages | `deriveSharedKey()` per contact | Memory only (fingerprint cached to localStorage) |
-| Group key | AES-256-GCM | Encrypt group messages | `generateGroupKey()` on group creation | `localStorage` — **plaintext base64** via `groupKeyBase64` |
-| Group key history | AES-256-GCM (array) | Decrypt pre-rotation messages | Archived on key rotation | Memory only |
-
-### 2.2 Key Derivation Chain (Current)
-
-```
-ECDSA P-521 keypair (localStorage, plaintext)
-    │
-    ├─► signData() / verifySignature()        [identity]
-    │
-    └─► ecdsaToECDHPrivate()                  [runtime only]
-            │
-            └─► deriveSharedKey(myECDH, theirECDH)
-                    │
-                    └─► HKDF-SHA256 → AES-256-GCM shared key  [memory only]
-                                │
-                                └─► encryptMessage() / decryptMessage()  [1:1 messages — redundant, see §6]
-
-Group key (localStorage, plaintext base64)
-    └─► encryptMessage() / decryptMessage()   [group messages — redundant, see §6]
-    └─► encryptGroupKeyForPeer()              [key distribution, pairwise encrypted — redundant, see §6]
-```
-
----
-
-## 3. Full Data Inventory — At Rest
-
-All data is stored in the browser via `localStorage` or `IndexedDB` (files via `saveFile()`).
-
-### 3.1 localStorage Keys
-
-| Key | Contents | Sensitivity | Currently Encrypted |
-|---|---|---|---|
-| `${APP_PREFIX}-sk` | ECDSA private key (base64 PKCS8) | **CRITICAL** | ❌ Plaintext |
-| `${APP_PREFIX}-pk` | ECDSA public key (base64 SPKI) | Low (public) | ❌ Plaintext (acceptable) |
-| `${APP_PREFIX}-pid` | PeerJS persistent ID | Medium | ❌ Plaintext |
-| `${APP_PREFIX}-name` | User display name | Medium | ❌ Plaintext |
-| `${APP_PREFIX}-disc-uuid` | Discovery UUID | Medium | ❌ Plaintext |
-| `${APP_PREFIX}-contacts` | All contacts: names, PIDs, public keys, fingerprints, shared key fingerprints | **HIGH** | ❌ Plaintext |
-| `${APP_PREFIX}-chats` | All 1:1 message history — fully decrypted content | **HIGH** | ❌ Plaintext |
-| `${APP_PREFIX}-groups` | All group info: member lists, public keys, PIDs, group key base64 | **CRITICAL** | ❌ Plaintext |
-| `${APP_PREFIX}-group-msgs-{id}` | All group message history — fully decrypted content | **HIGH** | ❌ Plaintext |
-| `${APP_PREFIX}-lastread` | Per-contact read timestamps | Low | ❌ Plaintext |
-| `${APP_PREFIX}-custom-ns` | Custom namespace names | Low | ❌ Plaintext |
-| `${APP_PREFIX}-pid-history` | Historical PeerJS IDs | Low | ❌ Plaintext |
-| `${APP_PREFIX}-offline` | Offline mode flag | None | ❌ Plaintext (acceptable) |
-| `${APP_PREFIX}-fp-migrated` | Migration flag | None | ❌ Plaintext (acceptable) |
-| `${APP_PREFIX}-ns-offline` | Namespace offline flag | None | ❌ Plaintext (acceptable) |
-| `${APP_PREFIX}-credential-created` | WebAuthn setup flag (proposed) | None | N/A |
-
-### 3.2 IndexedDB (File Storage)
-
-| Data | Contents | Sensitivity | Currently Encrypted |
-|---|---|---|---|
-| File blobs | Raw file content from transfers | **HIGH** | ❌ Plaintext |
-| File metadata | Name, size, timestamp, transfer ID | Medium | ❌ Plaintext |
-
-### 3.3 Critical Finding — Group Key Exposure
-
-The group encryption key is exported and stored plaintext in `localStorage`:
-
-```typescript
-// groupCreate() — p2p-group.ts
-const groupKeyBase64 = await exportGroupKey(groupKey);
-const info: GroupInfo = { ..., groupKeyBase64 };  // stored plaintext
-
-// groupRestore() — on every app load
-groupKey = await importGroupKey(info.groupKeyBase64);  // read from plaintext
-```
-
-This means anyone with localStorage access can decrypt **all past and future group messages** for every group the user belongs to, including post-rotation keys stored in `groupKeyHistory`.
-
----
-
-## 4. Full Data Inventory — In Transit
-
-All WebRTC DataChannel traffic is protected by **DTLS 1.2/1.3** at the transport layer (mandatory for WebRTC). The analysis below concerns **application-layer encryption** — i.e. protection that survives even if the transport layer were compromised.
-
-### 4.1 PeerJS Signaling Server (`0.peerjs.com`)
-
-**Transport:** TLS  
-**Application E2E:** ❌ None — server is a trusted broker
-
-| Data Visible to PeerJS | Notes |
+| Category | Definition |
 |---|---|
-| Your `persistentID` | Required for routing |
-| Your IP address | Inherent to TCP connection |
-| Who you connect to (PIDs) | Required for connection brokering |
-| Timing of connections | Metadata/traffic analysis possible |
-
-**Risk:** PeerJS can construct a social graph of who communicates with whom. Message content is not visible. This is an architectural constraint of the current design.
-
-### 4.2 1:1 Messaging (DataChannel) — Current State
-> Note: ECDH E2E encryption and group AES key paths shown below are current implementation. Both are identified as redundant in §6 and scheduled for removal in §8 Phase 5. Target state is DTLS+ECDSA for all channels.
-
-| Message Type | Wire Contents | App-Layer Encrypted | Signed |
-|---|---|---|---|
-| `hello` | `friendlyname`, `publicKey`, `ts`, `signature` | ❌ No | ✅ Yes (timestamp) |
-| `message` (E2E path) | `iv`, `ct`, `sig`, `ts`, `id`, `e2e:true` | ✅ AES-256-GCM (→ removing) | ✅ Yes (ciphertext) |
-| `message` (fallback) | `content`, `ts`, `id` | ❌ Plaintext | ❌ No |
-| `message-ack` | `id` | ❌ No (metadata only) | ❌ No |
-| `message-edit` (E2E) | `id`, `iv`, `ct`, `sig`, `e2e:true` | ✅ AES-256-GCM (→ removing) | ✅ Yes |
-| `message-edit` (fallback) | `id`, `content` | ❌ Plaintext | ❌ No |
-| `message-delete` | `id`, `tid` | ❌ No (metadata only) | ❌ No |
-| `file-start` | `tid`, `name`, `size`, `total` | ❌ Plaintext | ❌ No |
-| `file-chunk` | `tid`, `index`, raw `chunk` bytes | ❌ Plaintext | ❌ No |
-| `file-end` | `tid` | ❌ No | ❌ No |
-| `file-ack` | `tid` | ❌ No | ❌ No |
-| `call-notify` | `kind`, `from` | ❌ Plaintext | ❌ No |
-| `call-received/answered/rejected` | `kind` | ❌ Plaintext | ❌ No |
-| `name-update` | `name` | ❌ Plaintext | ❌ No |
-| `group-invite` | `groupId`, `groupName`, `inviterName`, `inviterFP`, full `info`, encrypted group key | Partial — group key encrypted pairwise (→ removing) | ❌ No |
-
-### 4.3 Group Messaging (DataChannel via Router) — Current State
-> Note: Group AES key encryption shown below is current implementation, identified as redundant in §6 and scheduled for removal in §8 Phase 5. Target state is DTLS+ECDSA for all group channels including backfill delivery to rejoining members.
-
-| Message Type | Wire Contents | App-Layer Encrypted | Notes |
-|---|---|---|---|
-| `group-checkin` | `fingerprint`, `friendlyName`, `publicKey`, `pid`, `sinceTs` | ❌ Plaintext | Discovery metadata |
-| `group-message` | msg object with `iv`, `ct`, `e2e:true` OR plaintext fallback | ✅ AES-256-GCM (→ removing) | Routed via verified group router |
-| `group-relay` | Same as above, opaque relay | ✅ Preserved (→ removing) | |
-| `group-message-edit` | `msgId`, `iv`, `ct`, `e2e` OR plaintext | ✅ When key available (→ removing) | |
-| `group-message-delete` | `msgId`, `senderFP` | ❌ Plaintext | |
-| `group-file-start` | `tid`, `name`, `size`, `total`, `senderFP`, `senderName` | ❌ Plaintext | |
-| `group-file-chunk` | `tid`, `index`, `data` (base64) | ❌ Plaintext | |
-| `group-file-end` | `tid` | ❌ No | |
-| `group-key-distribute` | `iv`, `ct` (group key encrypted pairwise) | ✅ AES-256-GCM pairwise (→ removing entire flow) | |
-| `group-key-rotate` | `iv`, `ct` (new group key encrypted pairwise) | ✅ AES-256-GCM pairwise (→ removing entire flow) | |
-| `group-info-update` | Full `GroupInfo` including member PIDs, public keys | ❌ Plaintext | |
-| `group-backfill` | Historical messages (encrypted blobs if E2E) | ✅ Preserved encryption (→ removing, DTLS covers backfill delivery) | Rejoining member receives missed messages over verified DTLS+ECDSA session |
-| `group-call-start/join/leave` | `callId`, `kind`, `fingerprint`, `pid`, `name` | ❌ Plaintext | Call metadata only |
-| `group-call-signal` | Call state, participant list with PIDs | ❌ Plaintext | |
-
-### 4.4 Namespace / Discovery (DataChannel)
-
-All namespace traffic is intentionally plaintext — it is discovery infrastructure analogous to DNS:
-
-| Data | Encrypted | Notes |
-|---|---|---|
-| Router checkin (`discoveryID`, `friendlyname`, `publicKey`) | ❌ No | By design |
-| Registry broadcasts (peer lists) | ❌ No | By design |
-| Ping/pong | ❌ No | Keepalive only |
-| Rendezvous exchange (PID updates) | ❌ No | Contact reconnection |
-| Peer slot probes | ❌ No | NAT traversal |
-
-**Risk Level:** Low-Medium. Namespace routers see peer identities and social graph but not message content. This is architecturally necessary for the discovery model.
-
-### 4.5 Media (WebRTC MediaConnection)
-
-| Type | Transport Encryption | App-Layer Encryption |
-|---|---|---|
-| Audio calls | ✅ DTLS-SRTP (mandatory WebRTC) | ❌ None |
-| Video calls | ✅ DTLS-SRTP | ❌ None |
-| Screen share | ✅ DTLS-SRTP | ❌ None |
-| Group calls | ✅ DTLS-SRTP | ❌ None |
+| **Passive in-transit** | Attacker intercepts wire traffic but cannot modify or inject |
+| **Active MITM / session spoofing** | Attacker terminates the DTLS session and substitutes themselves as a participant |
+| **At-rest** | Attacker has direct access to localStorage and IndexedDB on the device |
 
 ---
 
-## 5. Threat Model Summary
+## 2. Critical Distinction — ECDH Challenge vs ECDSA
 
-### 5.1 Network Attacker (passive interception)
-- **1:1 messages:** ✅ Protected — DTLS per-session encryption + ECDSA identity verification (current ECDH layer identified as redundant, see §6)
-- **Group messages:** ✅ Protected — DTLS per-hop + ECDSA verified peers (current group AES layer identified as redundant, see §6)
-- **Files:** ⚠️ DTLS transport only — no application E2E
-- **Calls:** ⚠️ DTLS-SRTP transport only
-- **Metadata (who talks to who):** ❌ Not protected
+Before evaluating individual channels, this distinction must be established clearly because the original audit confused these two tools throughout.
 
-### 5.2 Local Device Attacker (localStorage access)
-- **Private key:** ❌ Fully exposed — can impersonate user (addressed by §7 WebAuthn PRF master key)
-- **All message history:** ❌ Fully readable (addressed by §7 Tier 3 storage encryption)
-- **Group keys:** ❌ Fully exposed (addressed by §7 Tier 3 storage encryption — group key removed entirely in proposed model)
-- **Contact list:** ❌ Fully readable (addressed by §7 Tier 3 storage encryption)
-- **Files:** ❌ Fully readable from IndexedDB (addressed by §7 Phase 6 file encryption)
+**ECDSA answers: "Who authored this specific piece of data?"**
 
-### 5.3 Malicious Browser Extension
-- **Same-origin extensions:** Can read all localStorage and IndexedDB
-- **CryptoKey objects in memory:** Cannot export non-extractable keys but can invoke app functions
-- **Mitigation available:** WebAuthn PRF binds key material to device authenticator
-
-### 5.4 Compromised PeerJS Server
-- **Message content:** ✅ Not visible (E2E encrypted)
-- **Social graph:** ❌ Fully visible
-- **Connection timing:** ❌ Visible
-
----
-
-## 6. In-Transit Security — Current State, Analysis, and Conclusions
-
-### 6.1 How DTLS Works in WebRTC and Its PeerJS Dependency
-
-WebRTC's DTLS 1.2/1.3 is mandatory for all DataChannel and media traffic. Each peer generates a self-signed DTLS certificate. The fingerprint of that certificate is embedded in the SDP offer/answer that flows through the PeerJS signaling server. When the DTLS handshake occurs, both browsers verify the certificate matches the fingerprint from the SDP.
-
-The structural vulnerability is that PeerJS sits in the middle of the SDP exchange. A compromised PeerJS server could substitute its own DTLS fingerprint before the SDP reaches the remote peer:
-
-```
-Normal:
-  Alice SDP (fingerprint: A) → PeerJS → Bob verifies A → DTLS to Alice ✅
-
-Compromised PeerJS:
-  Alice SDP → PeerJS replaces fingerprint B → Bob verifies B → DTLS to attacker ❌
-```
-
-Bob's browser sees a valid DTLS connection and has no way to detect the substitution. This is the single meaningful weakness of relying on DTLS alone — it requires trusting the signaling server to faithfully relay SDP.
-
-### 6.2 What ECDSA Adds and Why It Is Sufficient
-
-The ECDSA `hello` handshake closes the PeerJS MITM gap completely:
+ECDSA produces a signature over a specific payload. The receiver can verify that the holder of a particular private key signed that exact payload. This is the right tool for per-message authorship — proving that a specific message was written by a specific person, not just that the channel is theirs.
 
 ```typescript
-const valid = await verifySignature(key, d.signature, d.ts);
-if (!valid) conn.close();
+// From sendEncryptedMessage() — ECDSA used correctly:
+const { iv, ct } = await encryptMessage(sk.key, msg.content);
+const sig = await signData(mgr.privateKey, ct);  // proves Alice authored this ciphertext
+conn.send({ type: 'message', iv, ct, sig, e2e: true });
 ```
 
-An attacker who performs the DTLS fingerprint substitution above cannot forge Alice's ECDSA signature — they don't have her private key. The hello handshake fails and the connection closes. Because the ECDSA public key is independently known and fingerprinted before any connection attempt, there is no way for PeerJS to substitute this identity either.
+This is sound. Even if the ECDH session is somehow compromised or a relay injects traffic, the ECDSA signature on each ciphertext proves the specific message came from the holder of Alice's private key at that moment.
 
-**ECDSA + DTLS together close the signaling MITM vector entirely.** No further application-level encryption layer is required for in-transit confidentiality on 1:1 connections.
+**ECDH challenge answers: "Are you who you claim to be right now?"**
 
-### 6.3 Is The Static ECDH Layer Redundant for 1:1?
+An ECDH challenge proves live private key possession by requiring the peer to decrypt something only they can decrypt. The receiver encrypts a random secret to the peer's public key. Only the holder of the corresponding private key can decrypt it and respond correctly. No signature needed — the ability to decrypt is the proof.
 
-Yes. Given ECDSA verifies the DTLS connection is clean, adding a static ECDH pairwise key provides no additional protection for the wire. DTLS is already encrypting the channel. The ECDH layer encrypts it again but with a static long-term key rather than DTLS's ephemeral per-session keys. The two layers are independent — DTLS keeps its own forward secrecy regardless — but the ECDH layer adds complexity without adding a meaningful new security property that DTLS + ECDSA doesn't already provide.
-
-**Conclusion: the static 1:1 ECDH layer is a candidate for removal.**
-
-### 6.4 Is The Group AES Key Redundant?
-
-Following the same logic consistently — yes, for the same reasons.
-
-The group router is a DTLS endpoint, so it receives decrypted bytes on each hop. However the router is also a verified group member — it holds the group key as a legitimate participant. The group key therefore provides no protection against the router reading messages, because the router is supposed to be able to read them as a member. Protection against a malicious router is entirely an application-code concern: ensuring only verified members are admitted and only verified members receive relayed messages. The group AES key does not strengthen or replace that application-level guarantee.
-
-Group key rotation on member removal follows the same pattern — rotation only works if the application code correctly limits who receives the new key. If the application code is correct, DTLS already ensures this. The encryption layer adds nothing on top of correct application logic.
-
-**Conclusion: the group AES key for in-transit confidentiality is also redundant given DTLS + ECDSA.** The pairwise ECDH used for group key distribution can be retired alongside it.
-
-### 6.5 How PeerNS In-Transit Compares To Signal and iMessage
-
-The critical architectural difference between PeerNS and Signal/iMessage is **where the server sits relative to message content**.
-
-Signal and WhatsApp route all messages through their own servers. The server holds your encrypted message while your recipient is offline. This means the server has persistent custody of encrypted content — and under legal compulsion, a cooperative Signal server still cannot produce plaintext because it never had the keys. Double Ratchet and X3DH exist specifically to make this guarantee hold even against a fully cooperative server.
-
-PeerNS uses PeerJS only for **signaling** — SDP exchange to establish the WebRTC connection. Once connected, messages travel directly peer-to-peer over DTLS-encrypted DataChannels. PeerJS never has custody of message content at any point, even transiently. This is actually a stronger position than Signal in one specific sense: there is no server that could be compelled to produce message metadata or timing data beyond connection establishment.
-
-The narrower trust requirement means Double Ratchet solves a problem PeerNS structurally doesn't have for established connections. The only PeerJS attack surface is the SDP exchange, which ECDSA already closes.
-
-**X3DH is also irrelevant to PeerNS.** X3DH exists to establish a shared secret with an offline peer by fetching prekeys from a server. PeerNS requires both peers to be reachable for a WebRTC connection — messages queue on-device and transmit when the peer reconnects over a fresh DTLS session. There is no offline prekey server to design around.
-
-| Property | PeerNS (DTLS+ECDSA) | Signal (Double Ratchet) | iMessage |
-|---|---|---|---|
-| Server sees message content | ❌ Never — P2P only | ❌ Never — E2E encrypted | ❌ Never — per-recipient encrypted |
-| Server sees who talks to whom | ✅ PeerJS sees connection graph | ✅ Signal sees metadata | ✅ Apple sees metadata |
-| Per-session forward secrecy | ✅ DTLS ephemeral keys | ✅ Per-message ratchet | ✅ Per-message keys |
-| Per-message forward secrecy | ❌ DTLS rotates per session | ✅ Every message | ✅ Every message |
-| Identity verification | ✅ ECDSA on every connection | ✅ X3DH + signed prekeys | ✅ Apple PKI |
-| Offline message delivery | ❌ Queue on device | ✅ Server holds encrypted | ✅ Apple holds encrypted |
-| Signaling server trust required | Partial — ECDSA closes MITM gap | None — DR independent of server | Partial — Apple PKI |
-| Protocol patented/licensed | ❌ No | ✅ Yes — commercial license required | ❌ No (proprietary) |
-
-**Group in-transit comparison:**
-
-| Property | PeerNS (DTLS+ECDSA) | Signal (Sender Keys) | iMessage (per-recipient) |
-|---|---|---|---|
-| Who relays group messages | ✅ No server — self-elected peer router from live group members. Zero server custody of any message at any point. (Con: no offline delivery) | ❌ Signal's servers — encrypted custody until recipient online | ❌ Apple's servers — encrypted custody until recipient online |
-| Relay node sees content | ✅ Structurally impossible — no server exists to see content. All hops are direct P2P DTLS+ECDSA between verified group members | ❌ Server holds encrypted blobs — content protected by E2E but server has persistent custody | ❌ Apple holds encrypted blobs — same as Signal |
-| Per-session forward secrecy (in-transit) | ✅ DTLS per session | ✅ Per-message ratchet | ✅ Per-message |
-| At-rest compromise blast radius | All stored messages exposed (equal to Signal/iMessage — see §7.5) | All stored messages exposed | All stored messages exposed |
-| Key distribution | None — DTLS+ECDSA per connection, no group key | X3DH prekeys via Signal server | Apple PKI per device |
-| Architecture complexity | Low — no server infrastructure | High | Medium |
-
-The group router in PeerNS is not a server — it is a dynamically self-elected peer from whoever is online in the group namespace, communicating via the same DTLS+ECDSA stack as all other connections. There is no central infrastructure with custody of messages. All relay hops are P2P and verified.
-
-At-rest compromise is equivalent across all three platforms once master key encryption is implemented — an attacker who defeats device authentication gets stored messages regardless of what the in-transit protocol did. This is not a PeerNS-specific weakness and should not be compared against in-transit properties of other platforms.
-
-### 6.6 The Case For Double Ratchet (Optional, Advanced)
-
-The only property DTLS+ECDSA does not provide that Double Ratchet does is **intra-session per-message forward secrecy**. DTLS rotates keys per connection. Double Ratchet rotates per message. The gap is:
-
-```
-Attacker compromises your device mid-session:
-  DTLS alone:       can read all messages in the current open session
-  Double Ratchet:   can only read messages from that point forward —
-                    past messages in the same session have already ratcheted away
+```typescript
+// Proposed challenge-response — ECDH used correctly for identity:
+const randomSecret = crypto.getRandomValues(new Uint8Array(32));
+const challenge = await ECDH_encrypt(theirPublicKey, randomSecret);
+conn.send({ type: 'challenge', challenge });
+// Only the real peer can decrypt this and send back randomSecret
 ```
 
-This is a real but narrow scenario requiring live device compromise during an active session. For most threat models this is not the primary concern. It is flagged as an optional advanced phase — the only remaining meaningful upgrade over the clean DTLS+ECDSA baseline.
+**Why ECDSA alone fails for session identity:**
 
-Note: if Double Ratchet were implemented, X3DH is not required. Since both peers are online for every WebRTC connection, the initial shared secret can be seeded directly from the existing ECDH hello handshake without prekey infrastructure.
-
-```
-Recommended Baseline:
-  DTLS       → wire confidentiality, per-session forward secrecy
-  ECDSA      → identity verification, closes PeerJS MITM gap
-  Master key → all at-rest encryption
-
-Optional Advanced (if intra-session forward secrecy required):
-  Double Ratchet → per-message forward secrecy
-  ECDSA          → identity verification
-  Master key     → all at-rest encryption
+The current hello handshake uses ECDSA to sign a timestamp:
+```typescript
+const sig = await signData(mgr.privateKey, ts);
+conn.send({ type: 'hello', publicKey, ts, signature: sig });
 ```
 
-### 6.7 Revised In-Transit Summary
+This is the wrong tool for the job. A timestamp signature is a static artifact — it is equally valid whether presented by Alice or by Mallory who captured it from Alice. ECDSA correctly answers "did Alice sign this timestamp?" but the question that needs answering is "is Alice on the other end of this connection right now?" Those are fundamentally different questions and ECDSA cannot answer the second one without a fresh challenge to sign.
 
-| Channel | Currently | Recommended | Change |
-|---|---|---|---|
-| 1:1 messages | DTLS + static ECDH + ECDSA | DTLS + ECDSA | Remove static ECDH |
-| 1:1 queued messages | DTLS + static ECDH + ECDSA | DTLS + ECDSA on reconnect | Fresh DTLS session per reconnect — forward secrecy maintained |
-| 1:1 files | DTLS only | DTLS + ECDSA | No encryption change needed |
-| Group messages | DTLS + group AES + ECDSA | DTLS + ECDSA | Remove group AES key — redundant given verified DTLS per hop |
-| Group files | DTLS only | DTLS + ECDSA | No encryption change needed |
-| Calls (1:1) | DTLS-SRTP | DTLS-SRTP + signed call token | Add ECDSA-signed token over DataChannel before call |
-| Group calls | DTLS-SRTP | DTLS-SRTP + signed token | Same as 1:1 call |
-| Namespace/discovery | DTLS (transport only) | DTLS (transport only) | No change — by design |
+**The rule going forward:**
+
+| Use case | Correct tool | Wrong tool |
+|---|---|---|
+| Session identity — "are you who you claim to be?" | ECDH challenge | ECDSA on static data |
+| Message authorship — "did you write this specific message?" | ECDSA on message content | ECDH challenge |
+
+Every instance of ECDSA in the codebase is evaluated against this rule below.
 
 ---
 
-## 7. At-Rest Security — Industry Methods, Current State, and Proposed Solution
+## 3. Current Cryptographic Architecture
 
-### 7.1 How Signal Handles At-Rest Encryption
+### 3.1 What Is Already In Place
 
-Signal is the most instructive reference because it documents its approach openly and takes at-rest security as seriously as in-transit.
+**DTLS 1.2/1.3** is mandatory for all WebRTC DataChannels and MediaConnections. It is enforced by the browser and cannot be disabled. Every channel in the system — 1:1, group, discovery, namespace, calls — already has DTLS transport encryption. This is not in question and does not need to be added anywhere.
 
-**Mobile (iOS and Android):**
-Signal stores all messages in a local SQLite database encrypted with **SQLCipher** — a full database encryption extension. The database key is a 256-bit random value generated on first install. On iOS this key is stored in the **Secure Enclave-backed Keychain** under the `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` attribute — meaning it requires the device to have been unlocked at least once since boot, is hardware-bound to the specific device, and is never exported from the Secure Enclave. On Android it uses the **Android Keystore** with hardware-backed key storage in the TEE (Trusted Execution Environment).
+**ECDSA P-521 identity keys** are generated on first run and stored in localStorage. Every outgoing persistent connection sends a `hello` packet signed with the private key. The receiving peer verifies the signature before proceeding. As established in §2, this is the wrong tool for session identity — ECDH challenge is needed here instead.
 
-The key never exists in application memory as raw bytes. It is used directly by SQLCipher via the OS APIs without ever being accessible to the application layer.
+**ECDH shared key derivation** uses the same P-521 curve points re-imported for ECDH. Both peers independently derive the same AES-256-GCM key from their private key and the peer's public key. This key encrypts 1:1 message content at the application layer on top of DTLS, and is the last line of defense against active MITM attacks.
 
-**Desktop (Electron):**
-Signal Desktop derives a storage key from the OS credential store (Keychain on macOS, Credential Manager on Windows, libsecret on Linux). It uses this to encrypt a local key file. The database is again SQLCipher-encrypted. This is weaker than mobile because desktop OS credential stores are less isolated than hardware-backed mobile keystores — but it is still meaningfully better than plaintext.
+**Group AES-256-GCM key** is generated per group, encrypted pairwise via ECDH, and distributed over the group namespace connection. Group messages are encrypted with this key at the application layer.
 
-**Key insight:** Signal never asks the user for a PIN or password for at-rest encryption on mobile. The OS hardware security model handles it. Authentication is handled by the device unlock mechanism (biometric/PIN) which in turn gates access to the Keychain/Keystore. The user experience is seamless — the database is just always encrypted.
+### 3.2 The Hello Handshake — Wrong Tool, Right Instinct
 
-### 7.2 How WhatsApp Handles At-Rest Encryption
+The hello handshake correctly identifies that session identity needs cryptographic verification. But it uses ECDSA on a static timestamp, which as established in §2 is replayable. The instinct to verify identity is correct; the implementation needs replacing with an ECDH challenge.
 
-WhatsApp relies primarily on the OS-level encryption provided by iOS Data Protection and Android's file-based encryption. Messages are in a SQLite database that is encrypted at the filesystem level by the OS when the device is locked.
+Additionally, no timestamp freshness check exists in the current code — `handlePersistentData()` verifies the signature is valid but never checks whether `ts` is recent. A captured hello from a previous session passes verification indefinitely. This is a partial mitigation worth adding, but does not address the fundamental problem since a live MITM receives the hello in real time anyway.
 
-WhatsApp additionally offers end-to-end encrypted backups (since 2021) using a 64-digit key or a user-supplied password derived via PBKDF2. The backup encryption key itself is stored in a hardware security module on WhatsApp's servers — which is a weaker model than Signal since it introduces server-side key storage.
+---
 
-Local storage on-device is primarily protected by the OS, not application-level encryption.
+## 4. Full Channel Security Inventory — In-Transit
 
-### 7.3 How iMessage Handles At-Rest Encryption
+### 4.1 1:1 Messaging
 
-iMessage uses iOS Data Protection classes. Each message database file is assigned a protection class:
+| Protection Layer | Status | Notes |
+|---|---|---|
+| DTLS transport | ✅ Present | Mandatory WebRTC |
+| ECDSA hello verification | ⚠️ Wrong tool | Present but replayable — ECDSA on timestamp proves nothing about live session identity. Needs ECDH challenge replacement. |
+| ECDSA timestamp freshness | ❌ Missing | No `Math.abs(Date.now() - ts) > 30000` check — partial mitigation worth adding |
+| ECDH message encryption | ✅ Correct | AES-256-GCM with HKDF-derived key — last line of defense against active MITM |
+| ECDSA signature on ciphertext | ✅ Correct tool | Sender signs `ct` — this is message authorship, the right use of ECDSA. Receiver verifies before decrypt. |
 
-- **Class A** (`CompleteProtection`): encrypted with a key derived from device passcode + device key. File is inaccessible when device is locked.
-- **Class B** (`CompleteUnlessOpen`): accessible while file is open, encrypted when closed and device locked.
-- **Class C** (`CompleteUntilFirstUserAuthentication`): accessible after first unlock, remains accessible until reboot.
+**Verdict:** 1:1 messages have the strongest protection in the system. The ECDH encryption and per-message ECDSA authorship signatures are both correct and must be retained. The hello identity check needs replacing with an ECDH challenge — it is currently replayable and vulnerable to the hello proxy attack described in §6.
 
-The actual database key is wrapped with the user's passcode-derived key and stored on-device. The Secure Enclave enforces passcode attempts and can wipe the key after too many failures (if configured).
+### 4.2 1:1 Files
 
-Apple also holds iCloud backup keys on their servers, which is a known weakness — iCloud backups of iMessages are not E2E encrypted by default (though Advanced Data Protection changes this).
+| Protection Layer | Status | Notes |
+|---|---|---|
+| DTLS transport | ✅ Present | |
+| Hello identity check | ⚠️ Wrong tool | Same replayable ECDSA hello as 1:1 messages |
+| ECDH file encryption | ❌ Missing | `file-start`, `file-chunk`, `file-end` sent plaintext in `_sendFileNow()` |
+| ECDSA authorship on file | ❌ Missing | No per-chunk or per-transfer signature |
 
-### 7.4 The Common Pattern Across All Three
+**Verdict:** File content is fully exposed under active MITM. No application-layer encryption, no authorship proof. Protected against passive interception by DTLS only.
 
-| App | Key Storage | Hardware-Backed | User Friction |
+### 4.3 1:1 Calls
+
+| Protection Layer | Status | Notes |
+|---|---|---|
+| DTLS-SRTP transport | ✅ Present | Mandatory WebRTC media |
+| Call identity verification | ❌ None | Call identity inherits entirely from the hello handshake — if that was spoofed, the call is with the attacker. DTLS-SRTP encrypts to whoever is on the connection. |
+| ECDH challenge on call token | ❌ Missing | No independent identity verification at call layer |
+
+**Verdict:** Call content is fully exposed if the hello identity was spoofed via the proxy attack. DTLS-SRTP encrypts to whoever Bob believes is Alice — if that is Mallory, Mallory receives the call content. SRTP provides no protection once session identity is compromised. A signed call token would not help here either — a token signed with ECDSA is equally replayable. What is needed is an ECDH challenge at call initiation to independently verify identity.
+
+**Locked-session interaction:** The ECDH challenge requires live private key access to decrypt. If the callee's device is locked when `call-notify` arrives, the private key is not in memory and the challenge cannot be answered. See §6.3 for the required two-phase call flow that gates the challenge behind the unlock step.
+
+### 4.4 Group Messages
+
+| Protection Layer | Status | Notes |
+|---|---|---|
+| DTLS transport | ✅ Present | All group hops are DTLS |
+| ECDSA on group checkin | ❌ Missing | `groupSendCheckin()` sends `fingerprint`, `publicKey`, `pid` unsigned — wrong tool anyway, ECDH challenge needed for identity |
+| Group AES-256-GCM encryption | ✅ Present | `groupSendMessage()` encrypts content with `state.groupKey` |
+| Pairwise ECDH for key distribution | ✅ Correct | `group-key-distribute` uses pairwise ECDH — correct tool, distributes key securely |
+| Group key rotation on member leave/kick | ✅ Present | `groupRotateKey()` called appropriately |
+
+**Verdict:** Group message content is well protected. Even a spoofed checkin cannot obtain the group key — it is distributed encrypted pairwise via ECDH to verified member public keys, which the attacker cannot decrypt without the corresponding private key. The checkin identity weakness is a metadata issue (fake presence) rather than a content confidentiality issue. Group AES must not be removed. See §6.
+
+### 4.5 Group Files
+
+| Protection Layer | Status | Notes |
+|---|---|---|
+| DTLS transport | ✅ Present | |
+| Sender identity verification | ❌ Missing | `group-file-start` carries `senderFP` and `senderName` unsigned and unverified |
+| Application encryption | ❌ Missing | Chunks sent plaintext |
+
+**Verdict:** Group file content fully exposed under active MITM. Same posture as 1:1 files.
+
+### 4.6 Group Calls
+
+| Protection Layer | Status | Notes |
+|---|---|---|
+| DTLS-SRTP transport | ✅ Present | |
+| Call identity verification | ❌ None | Same problem as 1:1 calls — inherits spoofed session identity |
+| ECDH challenge on call token | ❌ Missing | No independent identity verification at call layer |
+
+**Verdict:** Identical posture to 1:1 calls. DTLS-SRTP encrypts to the attacker's session if identity was spoofed. Call content fully exposed under active MITM. Same locked-session constraint applies — see §6.3.
+
+### 4.7 Namespace / Discovery
+
+| Protection Layer | Status | Notes |
+|---|---|---|
+| DTLS transport | ✅ Present | |
+| Identity verification | ❌ None (by design) | Discovery is a public bulletin board — verification here is redundant since the persistent connection hello (once fixed with ECDH challenge) is the real identity gate |
+| Application encryption | ❌ None (by design) | Intentionally public |
+
+**Verdict:** Namespace traffic is intentionally public. Adding identity verification here would be defending the lobby when the real security gate is the hello handshake at the persistent connection layer. Any spoofed namespace entry still has to pass the ECDH challenge hello to establish a usable session. Accepted design tradeoff.
+
+### 4.8 Rendezvous (p2p-rvz.ts)
+
+| Protection Layer | Status | Notes |
+|---|---|---|
+| DTLS transport | ✅ Present | |
+| ECDSA on rvz-exchange | ⚠️ Wrong tool | Same problem as hello — ECDSA on a timestamp is replayable. A captured rvz-exchange can be replayed to poison Bob's PID mapping for Alice, setting up the hello proxy attack. |
+| Content sensitivity | ❌ None | Only PIDs and public keys exchanged — public data, nothing to encrypt |
+
+**Verdict:** The ECDSA signature on the rvz-exchange is the wrong tool for the same reason as the hello — it proves Alice once signed a timestamp, not that Alice is present right now. A replayed exchange poisons Bob's PID mapping and triggers a reconnect to the attacker's PID, which then sets up the hello proxy attack. Needs ECDH challenge replacement. Practical exploitability is low since finding the rvz namespace requires either PeerJS server access or knowledge of the pairwise ECDH shared key, but the structural weakness is the same.
+
+---
+
+## 5. In-Transit Security Summary Table
+
+| Channel | Passive Intercept | Active MITM — Content | Active MITM — Identity |
 |---|---|---|---|
-| Signal mobile | iOS Keychain / Android Keystore | ✅ Yes (Secure Enclave / TEE) | None — device unlock gates it |
-| Signal desktop | OS credential store | Partial | None |
-| WhatsApp | OS filesystem encryption | ✅ Via OS | None |
-| iMessage | iOS Data Protection | ✅ Secure Enclave | None |
+| 1:1 messages | ✅ DTLS | ✅ ECDH (last line of defense) | ⚠️ ECDSA present but wrong tool — replayable, needs ECDH challenge |
+| 1:1 files | ✅ DTLS | ❌ Plaintext exposed | ⚠️ ECDSA present but wrong tool — replayable |
+| 1:1 calls | ✅ DTLS-SRTP | ❌ Fully exposed if identity spoofed — SRTP encrypts to attacker's session | ❌ No independent verification — inherits spoofed hello identity |
+| Group messages | ✅ DTLS | ✅ Group AES (last line of defense) | ⚠️ Checkin identity unverified — spoofed checkin possible, but group key is pairwise ECDH encrypted so attacker cannot decrypt it |
+| Group files | ✅ DTLS | ❌ Plaintext exposed | ❌ No verification on file sender |
+| Group calls | ✅ DTLS-SRTP | ❌ Fully exposed if identity spoofed — SRTP encrypts to attacker's session | ❌ No independent verification — inherits spoofed hello identity |
+| Namespace/discovery | ✅ DTLS | ❌ None (by design) | ❌ None (by design — identity gate is at hello layer) |
+| Rendezvous | ✅ DTLS | ❌ Public data only | ⚠️ ECDSA present but wrong tool — replayable, PID poisoning possible though low practical risk |
 
-The universal pattern is: **bind encryption keys to hardware-backed OS authentication. Never derive keys from application-level passwords. Never store keys in application storage.**
+---
 
-The user's device unlock mechanism (biometric/PIN) is the authentication factor. The OS hardware security module enforces this. The application never sees the raw key.
+## 6. At-Rest Security Inventory
 
-### 7.6 The Browser Equivalent — WebAuthn PRF
+All sensitive data is stored in plaintext. There is no encryption at rest. This is the highest priority remediation item.
 
-The browser has no Secure Enclave API, no Keychain API, no SQLCipher. However **WebAuthn with the PRF extension** provides the closest functional equivalent available on the web platform:
-
-- The credential is bound to the device's platform authenticator (Touch ID, Face ID, Windows Hello, device PIN)
-- The PRF output is computed inside the authenticator hardware — it never exists as a raw value the application can access directly
-- The output is deterministic — the same authentication always produces the same 32-byte PRF output
-- The application derives a master key from this output via HKDF, uses it to encrypt all sensitive storage, then discards it when the session locks
-- Without the device authenticator, the PRF output cannot be obtained — localStorage dumps are useless without it
-
-This is architecturally equivalent to Signal's Keychain/Keystore approach adapted to browser constraints.
-
-### 7.7 What Needs To Be Encrypted At Rest
-
-| Data | Current State | Required State | Why |
+| Data | Storage | Sensitivity | Currently Encrypted |
 |---|---|---|---|
-| ECDSA private key | ❌ Plaintext base64 | ✅ Encrypted (master key) | Critical — full identity compromise |
-| All 1:1 message history | ❌ Plaintext | ✅ Encrypted (master key) | Full conversation exposure |
-| All group message history | ❌ Plaintext | ✅ Encrypted (master key) | Full group conversation exposure |
-| Contact records (PIDs, public keys) | ❌ Plaintext | ✅ Encrypted (master key) | Social graph + identity data |
-| Group info (members, groupKeyBase64) | ❌ Plaintext | ✅ Encrypted (master key) transitioning to obsolete | Group key sitting plaintext is critical gap in current model — `groupKeyBase64` field removed entirely in proposed DTLS+ECDSA model, making this a non-issue going forward |
-| Discovery UUID | ❌ Plaintext | Plaintext acceptable | Broadcast openly to all namespace routers — public network identifier |
-| PID history | ❌ Plaintext | Plaintext acceptable | Broadcast openly to signaling server — public network identifier |
-| Display name | ❌ Plaintext | Plaintext acceptable | Not sensitive |
-| File blobs (IndexedDB) | ❌ Plaintext | ✅ Encrypted (master key) | File content exposure |
-| Offline/config flags | ❌ Plaintext | Plaintext acceptable | No sensitivity |
+| ECDSA private key (`-sk`) | localStorage | **CRITICAL** — full identity compromise | ❌ Plaintext base64 |
+| All 1:1 message history (`-chats`) | localStorage | **HIGH** | ❌ Plaintext |
+| All group message history (`-group-msgs-*`) | localStorage | **HIGH** | ❌ Plaintext |
+| Contact records including public keys (`-contacts`) | localStorage | **HIGH** | ❌ Plaintext |
+| Group info (`-groups`) | localStorage | **HIGH** | ❌ Plaintext |
+| File blobs | IndexedDB | **HIGH** | ❌ Plaintext |
+| PeerJS ID, display name, flags | localStorage | Low | ❌ Plaintext (acceptable) |
+| Discovery UUID, PID history | localStorage | None — public identifiers | ❌ Plaintext (acceptable) |
 
-### 7.8 Tiered Storage Model
+**Note on group key at rest:** The group AES key is stored plaintext in `groupKeyBase64` alongside the group info. This is irrelevant to at-rest security — group messages are themselves stored in plaintext, so an attacker with localStorage access already has the content directly without needing the key. The group AES key only matters for in-transit protection and preventing spoofed checkins from decrypting relayed messages.
+
+### **Proposed remediation for data-at-rest:** 
+WebAuthn PRF-derived master key (AES-256-GCM) encrypts all HIGH/CRITICAL tier storage. PBKDF2 password fallback for browsers without PRF support. Full tiered model below.
+
+### 6.1 Tiered Storage Model
 
 #### Tier 1 — Always Plaintext
+No sensitivity. Public identifiers or operational flags.
 ```
 ${APP_PREFIX}-offline
 ${APP_PREFIX}-ns-offline
@@ -424,28 +229,25 @@ ${APP_PREFIX}-disc-uuid         (discovery UUID — broadcast openly to all name
 ${APP_PREFIX}-custom-ns         (namespace names — broadcast openly during discovery)
 ```
 
-#### Tier 2 — Plaintext Metadata (pre-unlock notifications)
+#### Tier 2 — Plaintext Metadata (pre-unlock notifications only)
+Minimal data needed to render contact list and show notification sender name while session is locked. No PIDs, no public keys, no fingerprints, no message content.
 ```
 Key: ${APP_PREFIX}-contact-meta
 Contents: { [contactKey]: { friendlyName, lastMessageTs, unreadCount } }
-
-No PIDs, no public keys, no fingerprints, no message content.
-Purpose: render contact list and notification sender name while session is locked.
 ```
 
 #### Tier 3 — Encrypted with Master Key
+All sensitive data. Encrypted before write, decrypted after authentication.
 ```
 ${APP_PREFIX}-sk                  ECDSA private key
-${APP_PREFIX}-contacts            full contact records
+${APP_PREFIX}-contacts            full contact records including public keys
 ${APP_PREFIX}-chats               all 1:1 message history
-${APP_PREFIX}-groups              group info + groupKeyBase64 (groupKeyBase64 field obsolete in proposed model — group AES key removed entirely)
+${APP_PREFIX}-groups              group info and member lists
 ${APP_PREFIX}-group-msgs-{id}     group message history
-${APP_PREFIX}-disc-uuid           discovery UUID
-${APP_PREFIX}-pid-history         historical PeerJS IDs
-IndexedDB file blobs              encrypted before write
+IndexedDB file blobs              encrypted before write, decrypted on load
 ```
 
-### 7.9 Master Key Derivation and Session Lifecycle
+### 6.2 Master Key Derivation and Session Lifecycle
 
 ```
 Device Authenticator (Touch ID / Face ID / Windows Hello / PIN)
@@ -454,7 +256,7 @@ Device Authenticator (Touch ID / Face ID / Windows Hello / PIN)
             │
             └─► HKDF-SHA256 → Master AES-256-GCM key [memory only, non-extractable]
                     │
-                    ├─► Decrypt ECDSA private key → ECDSA sign/verify all connections
+                    ├─► Decrypt ECDSA private key → available for ECDH challenges + message signing
                     │
                     ├─► Encrypt/decrypt all Tier 3 localStorage values
                     │
@@ -469,7 +271,6 @@ Session Lifecycle:
 
     Idle 15 min / tab hidden / explicit lock
         masterKey = null
-        'session-locked' event dispatched
         UI shows lock screen
 
     Incoming message while locked
@@ -478,203 +279,271 @@ Session Lifecycle:
         Notify: "[Name]: New message" (Tier 2 only)
         On unlock → re-process stored payloads
 
+    Incoming call while locked
+        See §6.3 — call flow requires special handling distinct from messages.
+        call-notify stored and surfaced via Tier 2 metadata only.
+        ECDH challenge deferred until user taps Answer and unlock completes.
+
     User unlocks
         WebAuthn prompt again → same PRF output → same master key
         Decrypt pending payloads → full access restored
+        Resume any deferred call challenge-response flows
 
-Fallback (WebAuthn PRF unavailable — Chrome <116, Firefox, older Safari):
+Fallback (WebAuthn PRF unavailable — older browsers):
     PBKDF2(userPassword, storedSalt, 600_000 iterations, SHA-256) → master key
     Same tiered model applies
     Weaker: offline dictionary attack possible if storage + salt stolen
     Salt stored plaintext in Tier 1
 ```
 
+### 6.3 Locked-Session Call Handling — Two-Phase Flow
+
+Incoming calls present a specific conflict with the ECDH challenge requirement: the challenge requires the callee's private key to decrypt, but the private key is not in memory while the session is locked. The call flow must be split into two distinct phases with the unlock gate between them.
+
+**Phase 1 — Notification (no private key required)**
+- `call-notify` arrives on locked device over the persistent open DataChannel
+- Stored as a pending call payload; cannot be cryptographically processed yet
+- Lock screen renders caller name and call UI using Tier 2 metadata only
+- No challenge is issued or answered at this stage
+
+**Phase 2 — Answer gate (private key required, fires before media opens)**
+- User taps Answer → WebAuthn prompt fires immediately
+- Biometric/PIN → PRF → master key → private key decrypted into memory
+- ECDH challenge-response executes now, proving both sides' live key possession
+- Only on successful challenge completion does the call DataChannel and media negotiation proceed
+- Challenge failure → call rejected, no media flows, user notified
+
+```
+Caller                              Callee (locked)
+──────                              ───────────────
+send call-notify ──────────────►  store payload, show lock screen UI
+                                            │
+                                      user taps Answer
+                                            │
+                                      WebAuthn unlock
+                                            │
+                                      private key in memory
+                                            │
+◄────────── call-answer ────────────────────┘
+send ECDH challenge ───────────►
+◄────── challenge-response ─────  decrypt challenge, sign, respond
+verify response
+        │
+    [pass] → open media channel
+    [fail] → reject, notify both sides
+```
+
+**Implementation notes:**
+- The caller must hold an extended "awaiting answer" state. The ring timeout must not start from `call-notify` receipt but from when the callee's app acknowledges it — giving the user time to notice and tap Answer. From Answer tap to connected, the expected latency is under 1 second: biometric prompt typically completes in ~300ms, and the ECDH challenge-response is a handful of crypto operations over an already-open DataChannel. The ring timeout is a UX concern; the challenge itself is not a meaningful source of delay.
+- DTLS-SRTP negotiation may proceed in parallel with the challenge, but the media channel must not open until the challenge completes successfully. Negotiation and identity verification are independent steps; completion of DTLS alone is not sufficient.
+- A challenge timeout on an incoming call from a known contact should surface a visible failure notice — not a silent drop. A proxy attack attempting to answer on Alice's behalf would stall at the challenge step; surfacing this failure is useful signal to the user.
+- The ECDSA authorship signature on `call-notify` is still valuable here: even before unlock, the lock screen can confirm that Alice's key produced the notification, providing Tier 2-level authenticity on the caller display name.
+
 ---
 
-## 8. Implementation Strategy
+## 7. Why DTLS + Current ECDSA Alone Is Insufficient — The Hello Proxy Attack
 
-### Phase 1 — crypto.ts: Master Key Foundation
-- `createAuthCredential(userId)` — register WebAuthn credential with PRF extension
-- `getMasterKeyMaterial()` — authenticate, retrieve PRF output from hardware
-- `deriveMasterKey(prfOutput)` — HKDF-SHA256 → non-extractable AES-256-GCM
-- `encryptForStorage(masterKey, plaintext)` — AES-GCM with prepended IV
-- `decryptFromStorage(masterKey, blob)` — reverse
-- `deriveMasterKeyFromPassword(password, salt)` — PBKDF2 fallback
-- `detectPRFSupport()` — browser capability check
+### 7.1 The Attack Requires No Server Compromise
 
-### Phase 2 — store.ts: Encrypted Storage Layer
-All sensitive read/write functions accept `masterKey` parameter:
-- `saveChats(chats, masterKey) / loadChats(masterKey)`
-- `saveContacts(contacts, masterKey) / loadContacts(masterKey)`
-- `saveGroups(infos, masterKey) / loadGroups(masterKey)`
-- `saveGroupMessages(id, msgs, masterKey) / loadGroupMessages(id, masterKey)`
-- `saveFile(tid, blob, name, ts, masterKey)` — encrypt blob before IndexedDB write
-- New: `saveContactMeta(meta) / loadContactMeta()` — Tier 2, always plaintext
+**This attack does not require compromising PeerJS or any network infrastructure.** Because PeerNS is open source, any technically capable actor can clone the repository, add approximately 20 lines of code, and execute this attack against any two contacts they share. The attacker needs only to be a mutual contact of both Alice and Bob — a completely normal social condition in any messaging app.
 
-### Phase 3 — p2p.ts: Session Management
-In `loadState()`:
-1. Load Tier 1 + Tier 2 immediately, emit preliminary status
-2. Check `credential-created` — run `createAuthCredential()` on first run
-3. `getMasterKeyMaterial()` → triggers biometric/PIN prompt
-4. On PRF failure → PBKDF2 password fallback
-5. On both fail → dispatch `'auth-required'`, halt init
-6. `masterKey` stored on P2PManager instance (memory only)
-7. Decrypt Tier 3, continue normal init
+The attack in plain terms:
 
-New P2PManager members:
-- `masterKey: CryptoKey | null`
-- `sessionLocked: boolean`
-- `lockSession()` — nulls masterKey, emits `'session-locked'`
-- `unlockSession()` — re-runs WebAuthn / PBKDF2 flow
-- Idle timer: reset on `visibilitychange` and `pointerdown`
-- `pagehide` handler → null masterKey immediately
+1. Mallory is a saved contact of both Alice and Bob — two ordinary, legitimate connections
+2. Alice connects to Mallory and sends her `hello` — Mallory receives it in plaintext over their legitimate DTLS channel
+3. Mallory opens her own legitimate DTLS connection to Bob
+4. Mallory forwards Alice's `hello` packet verbatim to Bob
+5. Bob's app runs `verifySignature()` — it passes, because Alice genuinely did sign that timestamp
+6. Bob's app stores the connection as Alice and begins communicating. He is talking to Mallory.
 
-### Phase 4 — p2p-messaging.ts: Locked Session Handling
+No PeerJS modification. No network interception. No cryptographic attack. Just modified app code proxying a hello across two legitimate connections.
+
+### 7.2 Sample Exploit — Modified p2p-messaging.ts
+
+The following demonstrates precisely how the current codebase would be modified to execute this attack. The addition is minimal. The false verification follows directly from the existing `verifySignature()` call in `handlePersistentData()`, which has no way to detect the substitution.
+
 ```typescript
-// Incoming message while locked:
-if (!mgr.masterKey) {
-  mgr.pendingEncrypted = mgr.pendingEncrypted || [];
-  mgr.pendingEncrypted.push({ encryptedPayload: d, conn, ck });
-  const fname = loadContactMeta()[ck]?.friendlyName || 'Someone';
-  mgr.notify(fname, 'New message', `msg-${ck}`);
-  return;
+// ─── EXPLOIT: hello-proxy attack ─────────────────────────────────────────
+// Mallory adds this map at module scope to cache incoming hellos from contacts
+const capturedHellos: Map<string, any> = new Map();
+
+// ─── STEP 1: Mallory intercepts Alice's hello on her legitimate connection ──
+// This runs inside Mallory's handlePersistentData() when Alice connects.
+// No modification to the hello processing itself — Mallory just caches it.
+if (d.type === 'hello') {
+  // Store Alice's complete hello packet indexed by her public key fingerprint
+  capturedHellos.set(d.publicKey, d);
+  // ... normal hello processing continues unchanged ...
 }
 
-// On unlockSession() success:
-for (const p of mgr.pendingEncrypted || []) {
-  await handlePersistentData(mgr, p.encryptedPayload, p.conn);
+// ─── STEP 2: Mallory proxies Alice's hello to Bob ───────────────────────────
+// Mallory calls this after Alice's hello arrives and Bob's connection opens.
+async function proxyHelloToContact(
+  malloryMgr: P2PManager,
+  alicePublicKey: string,   // Alice's pubkey — used to look up her captured hello
+  bobContactKey: string     // Bob's contact key in Mallory's contact list
+) {
+  const aliceHello = capturedHellos.get(alicePublicKey);
+  if (!aliceHello) return;
+
+  const bobContact = malloryMgr.contacts[bobContactKey];
+  if (!bobContact?.conn?.open) return;
+
+  // Forward Alice's hello packet byte-for-byte to Bob's open connection.
+  // Mallory does NOT send her own hello — she sends Alice's.
+  bobContact.conn.send({
+    type:         'hello',
+    friendlyname: aliceHello.friendlyname,  // Alice's display name
+    publicKey:    aliceHello.publicKey,     // Alice's actual public key
+    ts:           aliceHello.ts,            // Alice's original timestamp
+    signature:    aliceHello.signature,     // Alice's valid ECDSA signature
+  });
 }
-mgr.pendingEncrypted = [];
+
+// ─── STEP 3: Bob's unmodified app false-verifies ────────────────────────────
+// The following is the EXISTING unmodified code in Bob's handlePersistentData().
+// No changes needed on Bob's side — the exploit works against the stock app.
+
+// From p2p-messaging.ts (existing, unmodified):
+if (d.publicKey && d.signature && d.ts) {
+  if (window.crypto?.subtle) {
+    try {
+      const key = await importPublicKey(d.publicKey);              // Alice's real pubkey ✅
+      const valid = await verifySignature(key, d.signature, d.ts); // Alice's real sig ✅
+      if (!valid) {
+        mgr.log(`Invalid signature from ${d.friendlyname}`, 'err');
+        conn.close();  // ← This never fires. Signature is genuinely valid.
+        return;
+      }
+      // Bob's app reaches here and concludes: "Alice is verified."
+      // The connection is stored under Alice's fingerprint.
+      // Bob is talking to Mallory.
+      mgr.contacts[contactKey].publicKey = d.publicKey;
+      mgr.log(`Verified identity for ${d.friendlyname}`, 'ok'); // ← Logs: verified ✅
+      mgr.getOrDeriveSharedKey(contactKey); // Derives ECDH key to Alice's pubkey — useless to Mallory
+    } catch { }
+  }
+}
 ```
 
-### Phase 5 — Remove Static ECDH From 1:1 and Group (Simplification)
-- Remove `getOrDeriveSharedKey()` from all `p2p-messaging.ts` send/receive paths
-- Remove `sendEncryptedMessage()` ECDH encryption branch
-- Remove group AES key encryption/decryption from `p2p-group.ts` message send/receive
-- Remove `group-key-distribute` / `group-key-rotate` message types
-- Remove `generateGroupKey` / `exportGroupKey` / `importGroupKey` usage from group flow
-- Retain ECDSA `hello` signature verification — unchanged and required
-- Result: significantly simpler codebase, DTLS + ECDSA trusted for all in-transit
+### 7.3 What Mallory Obtains From This Attack
 
-### Phase 6 — File Encryption At Rest (IndexedDB)
+```
+Bob sends Mallory (believing she is Alice):
+
+  ✅ All file transfers        — file-start/chunk/end are plaintext, fully readable
+  ✅ All incoming calls        — call-notify arrives, Mallory answers
+  ✅ All call content          — DTLS-SRTP encrypts to Mallory's session, not Alice's
+  ✅ All call metadata         — who is calling, what kind, timing
+  ✅ Group file transfers      — same plaintext exposure
+  ✅ All unsigned metadata     — name updates, read receipts, call notifications
+
+  ❌ 1:1 message content      — encrypted to Alice's public key via ECDH
+                                 Mallory cannot derive the shared key without Alice's private key
+  ❌ Group message content     — encrypted with group AES key distributed via pairwise ECDH
+                                 Mallory was not a member when the key was distributed
+```
+
+The ECDH encryption on messages and the group AES layer are what prevent this from being a complete session compromise. They must not be removed.
+
+### 7.4 Why Timestamp Freshness Does Not Close This Gap
+
+Adding a 30-second timestamp freshness check shrinks replay windows for stored old sessions but has no effect on this attack. Mallory receives Alice's hello in real time on their legitimate connection. The forwarded hello is therefore always fresh — its timestamp is seconds old, well within any reasonable window. The check is worth adding as defense-in-depth but does not address the structural problem.
+
+### 7.5 The ECDH Challenge Solution
+
+As established in §2, ECDH challenge is the correct tool for session identity because it requires live private key possession to produce a valid response. A captured hello cannot respond to a fresh challenge it has never seen:
+
 ```typescript
-// On save:
-const iv = crypto.getRandomValues(new Uint8Array(12));
-const ct = await crypto.subtle.encrypt(
-  { name: 'AES-GCM', iv }, masterKey, await blob.arrayBuffer()
-);
-const combined = new Uint8Array(12 + ct.byteLength);
-combined.set(iv); combined.set(new Uint8Array(ct), 12);
-// Store combined buffer
+// Step 1 — Bob → Alice: fresh challenge encrypted to Alice's public key
+const randomSecret = crypto.getRandomValues(new Uint8Array(32));
+const challenge = await ECDH_encrypt(alicePublicKey, randomSecret);
+conn.send({ type: 'challenge', challenge });
 
-// On load:
-const iv = combined.slice(0, 12);
-const ct = combined.slice(12);
-const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, masterKey, ct);
+// Step 2 — Alice → Bob: decrypts and signs the secret (proving both possession and authorship)
+const decrypted = await ECDH_decrypt(myPrivateKey, challenge);
+const response = await signData(myPrivateKey, decrypted);
+conn.send({ type: 'challenge-response', response });
+
+// Step 3 — Bob verifies:
+const valid = await verifySignature(alicePublicKey, response, randomSecret);
+if (!valid) conn.close();
 ```
 
-### Phase 7 — Double Ratchet (Optional, Advanced)
-If full independence from PeerJS trust is required — equivalent to Signal's threat model:
-- Implement X3DH initial key agreement on top of existing ECDSA/ECDH keys
-- Implement Double Ratchet: DH ratchet per exchange + symmetric ratchet per message
-- Provides per-message forward secrecy DTLS cannot offer
-- Replaces Phase 5 simplification for 1:1 messages
-- Group messaging would require Sender Keys (Signal's group ratchet approach)
-- Significant implementation complexity — only warranted if PeerJS is explicitly untrusted
+Mallory cannot execute the proxy attack against this. She receives a challenge encrypted to Alice's public key. She cannot decrypt it. She cannot produce a valid response. The connection closes.
+
+Note that ECDSA still appears in step 2 — but now in its correct role, signing the decrypted challenge to prove authorship of the response, not signing a static timestamp. The ECDH decryption proves live key possession; the ECDSA signature proves the response was actively produced by the same key, not just forwarded.
+
+### 7.6 ECDH Message Encryption Must Be Retained
+
+Until the ECDH challenge handshake is deployed, the ECDH application-layer encryption on messages is the only control preventing full content exposure under the hello proxy attack. Even after the challenge handshake is deployed, ECDH encryption provides independent defense-in-depth against any authentication bypass not yet anticipated. Removing a working encryption layer because authentication improved is not sound security practice.
+
+**The ECDH layer must not be removed under any circumstances.**
+
+### 7.7 Group AES Encryption Must Be Retained
+
+The group AES layer serves the same role for group channels. Without it, any peer that succeeds in spoofing group channel identity would receive group message content in plaintext. The pairwise ECDH protection on key distribution means a spoofed checkin still cannot obtain the group key — but the AES layer is the final guarantee that even relayed ciphertext is opaque without that key.
+
+**The group AES layer must not be removed under any circumstances.**
 
 ---
 
-## 9. Remaining Accepted Risks (Post-Implementation)
+## 8. Remediation Priority Order
 
-| Risk | Severity | Mitigation |
+| Priority | Item | Impact | Category |
+|---|---|---|---|
+| P0 | Encrypt ECDSA private key at rest (WebAuthn PRF master key) | Full identity compromise without this | At-rest |
+| P0 | Encrypt all message history and contact records at rest | Full conversation history exposed | At-rest |
+| P0 | Encrypt group info at rest | Group metadata and member lists exposed | At-rest |
+| P1 | Replace ECDSA timestamp hello with ECDH challenge-response | Closes hello proxy attack — the most accessible active MITM vector | In-transit |
+| P1 | Replace ECDSA timestamp on rvz-exchange with ECDH challenge-response | Closes PID poisoning attack that sets up hello proxy | In-transit |
+| P1 | Add ECDH challenge to group namespace checkin | Closes fake checkin identity — though group AES already protects content | In-transit |
+| P2 | ECDH encryption for 1:1 file transfer | Files currently fully exposed to active MITM | In-transit |
+| P2 | ECDH encryption for group file transfer | Same as above for group files | In-transit |
+| P2 | ECDH challenge on call initiation — unlock-gated per §6.3 | Independent identity verification at call layer; implementation must follow two-phase flow to handle locked-session devices | In-transit |
+| P2 | Add timestamp freshness check to hello and rvz-exchange | Partial defense-in-depth against stored replay — does not close live MITM | In-transit |
+| P2 | Locked-session incoming message handling | Enables secure operation while screen locked | At-rest |
+| P3 | File encryption at rest (IndexedDB) | File blobs fully exposed at rest | At-rest |
+| P3 | PBKDF2 fallback for browsers without WebAuthn PRF | Coverage for older Safari and Firefox | At-rest |
+| P3 | Safety number UI for contact verification | Hardens TOFU first-contact window | In-transit |
+| P4 | Idle session auto-lock | Reduces at-rest exposure window | At-rest |
+| P4 | Self-hosted PeerJS | Eliminates social graph visibility at signaling server | Architecture |
+| P5 | Double Ratchet (optional) | Per-message forward secrecy within sessions | In-transit |
+
+---
+
+## 9. Architectural Note — The Full-Circle Conclusion
+
+The original audit's Phase 5 recommendation to remove application-layer ECDH encryption was conceptually correct but built on a false premise. It claimed ECDSA+DTLS closed the identity gap, making ECDH redundant. It does not — as the hello proxy attack demonstrates. So removing ECDH at that stage would have introduced a serious vulnerability.
+
+However, if ECDH challenge-response is properly implemented to replace all current ECDSA timestamp signatures on session identity, the threat model changes significantly:
+
+- **Passive interception** — DTLS handles it. Application-layer ECDH adds nothing.
+- **Active MITM identity spoofing** — ECDH challenge handles it. The hello proxy attack collapses at step 2 because Mallory cannot decrypt a challenge encrypted to Alice's public key. Application-layer ECDH adds nothing here either.
+- **Private key stolen** — everything is broken regardless. Both ECDH challenge and application-layer ECDH fail equally.
+
+At that point the application-layer ECDH encryption on 1:1 messages and group AES encryption become redundant for in-transit and active MITM threat categories. The only remaining argument for keeping them is pure defense-in-depth — a backstop against an authentication bypass not yet anticipated. That is a legitimate engineering argument, but it is a different argument than "we need it right now."
+
+The one thing worth retaining unconditionally regardless of how identity verification evolves is the **per-message ECDSA authorship signatures** on ciphertext. These are not about channel confidentiality — they prove that a specific message was actively authored by the holder of the sender's private key, which DTLS and ECDH challenge alone cannot provide.
+
+So the correct long-term path is:
+1. Replace all ECDSA timestamp signatures on session identity with ECDH challenge-response — this closes the hello proxy attack properly
+2. Once ECDH challenge is deployed and verified, application-layer ECDH message encryption and group AES become optional defense-in-depth rather than mandatory controls
+3. Per-message ECDSA authorship signatures stay regardless
+
+The journey of this analysis ends up near where the original audit wanted to go — just via a completely different and actually sound path.
+
+---
+
+## 10. Accepted Residual Risks (Post-Remediation)
+
+| Risk | Severity | Notes |
 |---|---|---|
-| JS memory cannot be zeroed | Low | Browser constraint; non-extractable keys limit exposure |
-| Master key usable by same-origin malicious extension | Low-Medium | Requires extension with explicit host permission |
-| PeerJS social graph visibility (who talks to whom) | Medium | Self-host PeerJS server to eliminate entirely |
-| No intra-session per-message forward secrecy | Medium | Phase 7 Double Ratchet addresses if required |
-| WebAuthn PRF unavailable on some browsers | Medium | PBKDF2 password fallback covers gap |
-| PBKDF2 fallback weaker than PRF | Low-Medium | Offline dictionary attack if storage stolen; acceptable fallback |
-| Namespace/discovery exposes presence and display name | Low | By design for discovery; acceptable |
-| Call metadata (timing, participants) visible | Low | Content protected by DTLS-SRTP |
-
----
-
-## 10. Why Application-Level Encryption Is Not Redundant
-
-### The DTLS Question
-
-WebRTC DataChannels are protected by DTLS 1.2/1.3 at the transport layer — legitimate, strong, per-session encryption with ephemeral keys. A reasonable question is whether the ECDSA identity verification built on top of this is necessary. The answer is yes — but for identity only, not for message encryption.
-
-DTLS encrypts the channel but does not authenticate who is at the other end. DTLS certificate fingerprints travel through the PeerJS signaling server inside SDP negotiation packets. A compromised PeerJS server could substitute its own DTLS fingerprint before it reaches the peer, establishing a perfectly encrypted channel directly to an attacker. The victim sees a valid DTLS connection and has no way to detect the substitution from DTLS alone.
-
-The ECDSA hello handshake directly closes this vector. Because the remote peer must sign a timestamp with their private key, and because the public key is independently known and fingerprinted, a MITM cannot forge the signature without possessing the private key.
-
-```
-Without ECDSA:  You ──[DTLS]──► Attacker ──[DTLS]──► Peer   (invisible MITM)
-With ECDSA:     You ──[DTLS]──► Attacker             FAILS signature check → disconnect
-```
-
-**ECDSA is the necessary application-level addition to DTLS. Message-level ECDH encryption is not — it is redundant given verified DTLS channels and mutual ECDSA enforcement.**
-
-### Group Messages and DTLS+ECDSA
-
-The earlier conclusion that group AES encryption was non-negotiable due to DTLS being hop-by-hop has been superseded. Each hop in the group topology — sender to router, router to each member — is an independent DTLS+ECDSA verified connection between authenticated group members. The router is not an untrusted relay; it is a verified peer whose identity is confirmed via ECDSA on every session. There is no meaningful security difference between a 1:1 connection and a group hop under DTLS+ECDSA. The group AES key is redundant for the same reasons the 1:1 ECDH layer is redundant.
-
-### Code Correctness and the Self-Enforcing Property of DTLS+ECDSA
-
-A critical property of mutual ECDSA verification is that security does not depend on all parties running correct code — only one correctly coded peer is sufficient to enforce verification for their side of the connection.
-
-The hello handshake is always mutual:
-
-```
-Alice sends: { publicKey, signature, ts }
-Bob verifies → fail → disconnect
-
-Bob sends: { publicKey, signature, ts }
-Alice verifies → fail → disconnect
-```
-
-If Bob runs modified code that skips verifying Alice, he only undermines his own security. He cannot force Alice's correct app to skip her verification of him. Alice will not proceed unless Bob's ECDSA signature passes. A modified app cannot fool a correctly coded peer into communicating over an unverified channel — it can only fool itself.
-
-This gives three clean cases:
-
-```
-Correct app ↔ Modified app
-  → Correct app verifies modified app's hello
-  → Modified app cannot bypass this
-  → Correct side is fully protected
-
-Modified app ↔ Modified app
-  → Both users chose to run compromised code
-  → Outside any reasonable security model
-
-Private key stolen (either side)
-  → ECDSA broken → DTLS unverified
-  → ECDH equally broken → shared key derivable from stolen key
-  → Both models equally compromised
-  → At-rest private key protection is the only meaningful mitigation
-```
-
-The ECDH layer provides no additional protection in any of these cases that DTLS+ECDSA does not already provide. Security in all cases reduces to a single dependency: **private key protection at rest**. This is entirely addressed by the WebAuthn PRF master key encryption described in section 7.
-
-### The Priority Inversion Problem
-
-The codebase correctly implements identity verification via ECDSA and transport security via DTLS, but has not yet closed the simpler, more practically exploitable gap: plaintext storage at rest. The result is a system that defeats a compromised signaling server while remaining fully readable to anyone who opens DevTools or accesses the device's localStorage. The threat model is inverted relative to the realistic attack surface for a browser application.
-
-The at-rest encryption work described in this document is what makes the security model coherent end-to-end. ECDSA+DTLS handles the wire. WebAuthn PRF master key handles storage. Neither layer is unnecessary — they solve distinct problems. The redundant layer that has been identified and scheduled for removal is the application-level ECDH message encryption, not ECDSA identity verification.
-
----
-
-## 10. Priority Order
-
-| Priority | Item | Impact |
-|---|---|---|
-| P0 | Encrypt ECDSA private key at rest | Critical — full identity compromise possible |
-| P1 | Encrypt all message history at rest (1:1 and group) | High — full conversation history exposed |
-| P1 | Encrypt contacts at rest | High — social graph + public keys exposed |
-| P2 | Locked-session message handling | High — enables secure background operation |
-| P2 | File encryption at rest (IndexedDB) | Medium-High |
-| P3 | Add ECDSA signed call token over DataChannel before call | Medium — ties call to verified identity |
-| P3 | PBKDF2 fallback for unsupported browsers | Medium |
-| P4 | Idle session auto-lock | Low-Medium |
-| P4 | Self-hosted PeerJS (eliminate social graph) | Low |
+| TOFU on first contact | Medium | ECDH challenge hardens subsequent connections. First connection still relies on PeerJS not substituting the public key. Safety numbers UI addresses this for high-security use. |
+| PeerJS social graph visibility | Medium | PeerJS sees who connects to whom. Self-hosting eliminates this entirely. |
+| No intra-session per-message forward secrecy | Medium | DTLS rotates keys per connection, not per message. Double Ratchet addresses this if required. |
+| WebAuthn PRF browser support gaps | Medium | PBKDF2 fallback covers this at reduced security. |
+| Same-origin malicious browser extension | Low-Medium | Can read localStorage and invoke app functions. WebAuthn PRF binds key material to device authenticator, limiting exposure. |
+| JS memory cannot be zeroed | Low | Browser platform constraint. Non-extractable CryptoKey objects limit export exposure. |
+| Namespace/discovery presence exposure | Low | By design — discovery requires presence metadata. |
+| Call participant metadata visible | Low | Timing and participant list visible even with content protected. |
